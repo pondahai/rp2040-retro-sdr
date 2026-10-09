@@ -61,6 +61,7 @@ typedef struct {
     int avg;                          /* 0..SDR_AVG_LEVELS-1 */
     int peak_on;
     int quiet;                        /* 1 = 暫停 LCD 更新（雜訊診斷用） */
+    int tx_on;                        /* 1 = GPIO 0 輸出測試訊號（平台負責實作） */
 
     char entry[12];                   /* 頻率輸入中（kHz） */
     int  entry_len;

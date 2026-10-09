@@ -196,6 +196,9 @@ int sdr_key(sdr *s, const key_event *ev)
     case 'q':
         s->quiet = !s->quiet;
         return 1;
+    case 't':
+        s->tx_on = !s->tx_on;
+        return 1;
     }
     return 0;
 }
@@ -265,6 +268,8 @@ void sdr_prepare(sdr *s)
         sprintf(b, "BW %d  STEP %d  VOL %d", s->bw_hz, s->step_hz, s->vol);
         text(s, 112, 4, C_GRAY, b);
     }
+    if (s->tx_on)
+        text(s, UI_W - 6 * 8 - 4, 4, C_RED, "TX");
     if (s->quiet)
         text(s, UI_W - 6 * 5 - 4, 4, C_RED, "QUIET");
     else if (s->peak_on)
@@ -313,5 +318,5 @@ void sdr_prepare(sdr *s)
     text(s, 4, UI_Y_HINT + 1, C_DIM,
          "PAD <>TUNE ^vREF  A/B VOL  SEL MODE  START STEP");
     text(s, 4, UI_Y_HINT + 9, C_DIM,
-         "KBD 0-9.ENTER FREQ  M B S  -/= VOL  [ ] A P Q");
+         "KBD 0-9.ENTER FREQ  M B S  -/= VOL  [ ] A P Q T");
 }

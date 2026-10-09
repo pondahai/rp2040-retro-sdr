@@ -67,6 +67,40 @@ extern "C" {
 #define PWM_WRAP         499
 #define PWM_MID          250
 
+// ---- 測試訊號（M2 驗收用）----
+// GPIO 0 目前閒置（HARDWARE.md）。用 PWM 打一個 68.49 kHz 的方波（BPC 附近），
+// 靠板上走線的串音或旁邊繞一圈線耦合進 GPIO 26，不用外部儀器就能驗證
+// 天線 -> ADC -> 頻譜 -> DDC -> 喇叭 的整條路徑。方波的 3 次諧波在 205.5 kHz，
+// 頻譜上也該看得到。鍵盤 T 開關。
+//
+// 250 MHz / 3650 = 68,493 Hz。是方波，不是正弦，而且 GPIO 推的是 3.3 V ——
+// 當然不能接天線發射出去，只是給自己聽。
+#define PIN_TESTTONE     0
+#define TESTTONE_WRAP    3649
+#define TESTTONE_FREQ    (SYS_CLOCK_KHZ * 1000 / (TESTTONE_WRAP + 1))
+
+static void testToneSet(bool on)
+{
+    static bool inited, state;
+    if (!inited) {
+        uint slice = pwm_gpio_to_slice_num(PIN_TESTTONE);
+        pwm_config cfg = pwm_get_default_config();
+        pwm_config_set_clkdiv(&cfg, 1.0f);
+        pwm_config_set_wrap(&cfg, TESTTONE_WRAP);
+        pwm_init(slice, &cfg, true);
+        pwm_set_gpio_level(PIN_TESTTONE, (TESTTONE_WRAP + 1) / 2);
+        inited = true;
+    }
+    if (on == state)
+        return;
+    state = on;
+    if (on) {
+        gpio_set_function(PIN_TESTTONE, GPIO_FUNC_PWM);
+    } else {
+        gpio_init(PIN_TESTTONE);           // 關掉 = 回到 SIO 輸入，高阻抗
+    }
+}
+
 // ---- 遊戲按鍵（active-low、內部上拉）----
 #define PIN_BTN_UP       9
 #define PIN_BTN_DOWN     5
@@ -564,6 +598,7 @@ void loop()
     if (g_sdr.ddc_dirty)
         pushDdcParams();
     g_vol = g_sdr.vol;
+    testToneSet(g_sdr.tx_on);
 
     // DSP
     uint32_t t1 = time_us_32();
@@ -599,6 +634,16 @@ void loop()
                       (unsigned long)((t3 - t2) / 1000),
                       (unsigned long)(clock_get_hz(clk_sys) / 1000000),
                       sp->nf / 10, abs(sp->nf % 10));
+        {
+            int cb = sdr_cursor_bin(&g_sdr), lv = sp->bin_db[cb];
+            if (cb > 0 && sp->bin_db[cb - 1] > lv) lv = sp->bin_db[cb - 1];
+            if (cb < SP_BINS - 1 && sp->bin_db[cb + 1] > lv) lv = sp->bin_db[cb + 1];
+            int b3 = (int)((3LL * TESTTONE_FREQ * SP_N + SP_FS / 2) / SP_FS);
+            Serial.printf("    tune %ld Hz %s: sig %d.%d dBFS (S/N %d.%d) | 3rd harmonic bin %d.%d | tx %d\n",
+                          (long)g_sdr.tune_hz, ddc_mode_name(g_sdr.mode),
+                          lv / 10, abs(lv % 10), (lv - sp->nf) / 10, abs((lv - sp->nf) % 10),
+                          sp->bin_db[b3] / 10, abs(sp->bin_db[b3] % 10), g_sdr.tx_on);
+        }
         Serial.printf("    core1: ddc %lu us/block (fir+demod %lu us, rest %lu us), "
                       "audio fill %lu, underruns %lu\n",
                       (unsigned long)g_ddc_us, (unsigned long)g_ddc.t_post,
