@@ -199,6 +199,9 @@ int sdr_key(sdr *s, const key_event *ev)
     case 't':
         s->tx_on = !s->tx_on;
         return 1;
+    case 'i':
+        s->show_stats = !s->show_stats;
+        return 1;
     }
     return 0;
 }
@@ -316,9 +319,15 @@ void sdr_prepare(sdr *s)
         text(s, 4, UI_Y_INFO + 18, C_GRAY, b);
     }
 
+    /* 統計頁：蓋在瀑布圖的位置。不插 USB（用電池跑、收訊最乾淨）時看數字用 */
+    if (s->show_stats)
+        for (int i = 0; i < UI_STAT_LINES; i++)
+            if (s->stats[i][0])
+                text(s, 4, UI_Y_WF + 4 + i * 8, i == 0 ? C_WHITE : C_GRAY, s->stats[i]);
+
     /* 按鍵提示 */
     text(s, 4, UI_Y_HINT + 1, C_DIM,
          "PAD <>TUNE ^vREF  A/B VOL  SEL MODE  START STEP");
     text(s, 4, UI_Y_HINT + 9, C_DIM,
-         "KBD 0-9.ENTER FREQ  M B S  -/= VOL  [ ] A P Q T");
+         "KBD 0-9.ENTER FREQ M B S -/= VOL [ ] A P Q T I");
 }

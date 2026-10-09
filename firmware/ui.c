@@ -52,6 +52,10 @@ static void spec_line(const sdr *s, int r, uint16_t *out)
 
 static void wf_line(const sdr *s, int r, uint16_t *out)
 {
+    if (s->show_stats) {                    /* 統計頁：底色，字由 text_line 疊上去 */
+        fill(out, C_INFO);
+        return;
+    }
     const uint8_t *row = wfall_row(&s->wf, r);
     for (int x = 0; x < UI_W; x++)
         out[x] = s->wf.pal[row[x]];

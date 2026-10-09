@@ -32,7 +32,8 @@
 #define UI_Y_HINT   224
 
 #define UI_TEXT_COLS (UI_W / 6)
-#define UI_MAX_TEXT  16
+#define UI_MAX_TEXT  32
+#define UI_STAT_LINES 11             /* 統計頁的行數：瀑布圖區 96 px / 8 px，留上下邊 */
 
 typedef struct {
     int16_t  x, y;
@@ -63,6 +64,8 @@ typedef struct {
     int quiet;                        /* 1 = 暫停 LCD 更新（雜訊診斷用） */
     int tx_on;                        /* 1 = GPIO 0 輸出測試訊號（平台負責實作） */
     char tc[UI_TEXT_COLS + 1];        /* 授時碼狀態列，平台填；空字串 = 不顯示 */
+    int  show_stats;                  /* 1 = 瀑布圖的位置改顯示統計（鍵盤 I） */
+    char stats[UI_STAT_LINES][UI_TEXT_COLS + 1];   /* 平台填 */
     int  tc_locked;
 
     char entry[12];                   /* 頻率輸入中（kHz） */

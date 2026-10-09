@@ -563,6 +563,73 @@ static void updateTimecodeLine()
     g_sdr.tc_locked = jjy_locked(&g_jjy);
 }
 
+// 調諧點 ±1 bin 的最大值（dBFS×10）。序列埠與統計頁共用。
+static int tuneLevel()
+{
+    const spectrum *sp = &g_sdr.sp;
+    int cb = sdr_cursor_bin(&g_sdr), lv = sp->bin_db[cb];
+    if (cb > 0 && sp->bin_db[cb - 1] > lv) lv = sp->bin_db[cb - 1];
+    if (cb < SP_BINS - 1 && sp->bin_db[cb + 1] > lv) lv = sp->bin_db[cb + 1];
+    return lv;
+}
+
+// dB×10 -> "-97.0"
+static const char *db10(char *b, int v)
+{
+    sprintf(b, "%s%d.%d", v < 0 ? "-" : "", abs(v) / 10, abs(v) % 10);
+    return b;
+}
+
+// ============================================================================
+// 統計頁（鍵盤 I）：序列埠上那些數字，搬到螢幕上
+//
+// 收訊最乾淨的時候是拔掉 USB、用電池跑（筆電充電器的雜訊會從 USB 地線灌進來），
+// 那時候讀不到序列埠。這頁只在打開時才組字串，不打開不花時間。
+// ============================================================================
+
+static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
+{
+    if (!g_sdr.show_stats)
+        return;
+    const spectrum *sp = &g_sdr.sp;
+    char (*L)[UI_TEXT_COLS + 1] = g_sdr.stats;
+    const int W = UI_TEXT_COLS + 1;
+    char a[12], b[12];
+    uint32_t up = millis() / 1000;
+    int lv = tuneLevel();
+
+    snprintf(L[0], W, "STATS                          uptime %02lu:%02lu:%02lu",
+             (unsigned long)(up / 3600), (unsigned long)(up / 60 % 60), (unsigned long)(up % 60));
+    snprintf(L[1], W, "CORE0  proc %lu ms = scan %lu.%lu + dsp %lu + draw %lu",
+             (unsigned long)g_sdr.proc_ms, (unsigned long)(scan_us / 1000),
+             (unsigned long)(scan_us / 100 % 10), (unsigned long)(dsp_us / 1000),
+             (unsigned long)(draw_us / 1000));
+    snprintf(L[2], W, "       fft %lu ms  db %lu ms   blocks %lu  drop %lu",
+             (unsigned long)(sp->t_fft / 1000), (unsigned long)(sp->t_db / 1000),
+             (unsigned long)g_sdr.blocks, (unsigned long)g_sdr.drops);
+    snprintf(L[3], W, "CORE1  ddc %lu ms of 65  (fir %lu  cic %lu)",
+             (unsigned long)(g_ddc_us / 1000), (unsigned long)(g_ddc.t_post / 1000),
+             (unsigned long)((g_ddc.t_total - g_ddc.t_post) / 1000));
+    snprintf(L[4], W, "AUDIO  fill %lu  underruns %lu  vol %d",
+             (unsigned long)(g_aud_w - g_aud_r), (unsigned long)g_aud_under, g_sdr.vol);
+    snprintf(L[5], W, "CLOCK  sys %lu MHz  peri %lu MHz  spi %lu.%lu MHz",
+             (unsigned long)(clock_get_hz(clk_sys) / 1000000),
+             (unsigned long)(clock_get_hz(clk_peri) / 1000000),
+             (unsigned long)(spi_get_baudrate(spi0) / 1000000),
+             (unsigned long)(spi_get_baudrate(spi0) / 100000 % 10));
+    {
+        char c[12];
+        snprintf(L[6], W, "SIGNAL NF %s dBFS  tune %s dBFS  S/N %s",
+                 db10(a, sp->nf), db10(b, lv), db10(c, lv - sp->nf));
+    }
+    snprintf(L[7], W, "JJY    span %d dB  sym %lu  frames %lu  err %d",
+             (int)(g_jjy.hi - g_jjy.lo), (unsigned long)g_jjy.symbols,
+             (unsigned long)g_jjy.frames, g_jjy.last_err);
+    snprintf(L[8], W, "TX     %s", g_sdr.tx_on ? "on, GPIO 0, 68493 Hz" : "off");
+    L[9][0] = 0;
+    snprintf(L[10], W, "I = back to waterfall");
+}
+
 static void pushDdcParams()
 {
     g_p_tune = g_sdr.tune_hz;
@@ -669,6 +736,7 @@ void loop()
 
     uint32_t t3 = time_us_32();
     g_sdr.proc_ms = (t3 - t0) / 1000;             // 掃描＋DSP＋畫面，下一張才顯示
+    updateStats(g_sdr.scan_us, t2 - t1, t3 - t2);
 
     // 每秒一行，拆開各段時間：要優化哪一邊，看這裡
     if (now - last_log >= 1000) {

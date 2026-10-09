@@ -224,6 +224,28 @@ int main(void)
         sdr_prepare(s);
         write_screen(s, "screen.ppm");
         printf("        wrote screen.ppm\n");
+
+        /* 統計頁（鍵盤 I）：內容是平台填的，這裡放一份上機時的樣子 */
+        static const char *demo[UI_STAT_LINES] = {
+            "STATS                          uptime 00:12:34",
+            "CORE0  proc 62 ms = scan 1.0 + dsp 37 + draw 24",
+            "       fft 25 ms  db 8 ms   blocks 11234  drop 0",
+            "CORE1  ddc 31 ms of 65  (fir 15  cic 16)",
+            "AUDIO  fill 726  underruns 828  vol 5",
+            "CLOCK  sys 250 MHz  peri 250 MHz  spi 62.5 MHz",
+            "SIGNAL NF -97.0 dBFS  tune -88.1 dBFS  S/N 8.9",
+            "JJY    span 12 dB  sym 133  frames 2  err 0",
+            "TX     off",
+            "",
+            "I = back to waterfall",
+        };
+        press(s, 'i');
+        for (int i = 0; i < UI_STAT_LINES; i++)
+            snprintf(s->stats[i], sizeof s->stats[i], "%s", demo[i]);
+        sdr_prepare(s);
+        write_screen(s, "stats.ppm");
+        CHECK(s->show_stats && s->ntext <= UI_MAX_TEXT, "stats page fits (%d text items)", s->ntext);
+        press(s, 'i');
     }
 
     printf("[4] keys\n");
