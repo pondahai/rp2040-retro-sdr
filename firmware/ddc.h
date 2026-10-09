@@ -32,6 +32,8 @@
 #define DDC_DECIM   64
 #define DDC_AFS_X2  15625               /* 音訊取樣率 × 2 = 7812.5 Hz × 2 */
 #define DDC_TAPS    127
+#define DDC_ENV_DECIM 64                /* 7812.5 / 64 ≈ 122 Hz，每 8.2 ms 一點 */
+#define DDC_ENV_MAX   16
 
 enum { DDC_AM = 0, DDC_CW, DDC_USB, DDC_LSB, DDC_NMODES };
 
@@ -66,6 +68,16 @@ typedef struct {
     float    am_dc;                     /* AM 去 DC 的慢平均 */
     float    agc_env;                   /* AGC 的包絡 */
     float    level;                     /* 通帶內的訊號強度（給 S 表），線性 */
+
+    /* 包絡輸出（給授時碼解碼）：每 DDC_ENV_DECIM 個音訊樣本取一次通帶內的
+     * 平均功率（AGC 之前），附帶真實時間戳。時間戳把鍵盤掃描的空檔也算進去，
+     * 不然串起來的「一秒」會短 3%。 */
+    float    env[DDC_ENV_MAX];
+    uint32_t env_ms[DDC_ENV_MAX];
+    int      env_n;                     /* 這一塊產生了幾個 */
+    float    env_acc;
+    int      env_cnt;
+    uint64_t t_samples;                 /* 從開機算起，經過的真實 500 kHz 取樣數 */
 
     /* 上一塊的耗時（µs）：整塊、其中 FIR＋解調的部分。ddc_clock_us 沒設就是 0。 */
     uint32_t t_total, t_post;

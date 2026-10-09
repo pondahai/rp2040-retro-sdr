@@ -306,8 +306,10 @@ void sdr_prepare(sdr *s)
     if (s->entering) {
         sprintf(b, "FREQ> %s_ kHz    ENTER=GO  ESC=CANCEL", s->entry);
         text(s, 4, UI_Y_INFO + 18, C_AMBER, b);
+    } else if (s->tc[0]) {
+        /* 調在授時台上：顯示解碼。鎖定前是琥珀色，鎖定後是青色 */
+        text(s, 4, UI_Y_INFO + 18, s->tc_locked ? C_CYAN : C_AMBER, s->tc);
     } else {
-        /* Hann 窗的等效雜訊頻寬是 1.5 個 bin：122 × 1.5 ≈ 183 Hz */
         sprintf(b, "REF %d RNG %d AVG %s  PROC %lums DROP %lu",
                 s->ref_db, s->range_db, AVG[s->avg].name,
                 (unsigned long)s->proc_ms, (unsigned long)s->drops);

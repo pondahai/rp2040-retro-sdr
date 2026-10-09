@@ -62,6 +62,8 @@ typedef struct {
     int peak_on;
     int quiet;                        /* 1 = 暫停 LCD 更新（雜訊診斷用） */
     int tx_on;                        /* 1 = GPIO 0 輸出測試訊號（平台負責實作） */
+    char tc[UI_TEXT_COLS + 1];        /* 授時碼狀態列，平台填；空字串 = 不顯示 */
+    int  tc_locked;
 
     char entry[12];                   /* 頻率輸入中（kHz） */
     int  entry_len;

@@ -187,6 +187,8 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
     uint32_t st = d->lo_step;
     /* 沒看到的那段時間，本振照樣要轉過去 */
     uint32_t ph = d->lo_phase + (uint32_t)(gap + skip) * st;
+    d->t_samples += (uint64_t)(gap + skip);
+    d->env_n = 0;
     uint32_t i0 = d->integ_a[0][0], i1 = d->integ_a[0][1], i2 = d->integ_a[0][2];
     uint32_t q0 = d->integ_a[1][0], q1 = d->integ_a[1][1], q2 = d->integ_a[1][2];
     int dec_a = d->dec_a;
@@ -203,6 +205,7 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
         sum += x[k];
     int32_t dc = n ? (int32_t)((sum + n / 2) / n) : 2048;
 
+    uint64_t t_base = d->t_samples;          /* x[0] 的真實取樣時間 */
     for (int k = 0; k < n; k++) {
         int32_t v = (int32_t)x[k] - dc;
         uint32_t idx = ph >> (32 - NCO_BITS);
@@ -262,6 +265,18 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
         float pw = zi * zi + zq * zq;
         d->level += (pw - d->level) * 0.01f;
 
+        d->env_acc += pw;
+        if (++d->env_cnt == DDC_ENV_DECIM) {
+            if (d->env_n < DDC_ENV_MAX) {
+                d->env[d->env_n] = d->env_acc / DDC_ENV_DECIM;
+                /* 這一點代表過去 64 個音訊樣本，時間取區間中點 */
+                d->env_ms[d->env_n] = (uint32_t)((t_base + k + 1 - DDC_DECIM * DDC_ENV_DECIM / 2) / 500);
+                d->env_n++;
+            }
+            d->env_acc = 0;
+            d->env_cnt = 0;
+        }
+
         float y;
         if (d->mode == DDC_AM) {
             float mag = sqrtf(pw);
@@ -290,6 +305,7 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
     }
 
     d->lo_phase = ph;
+    d->t_samples = t_base + (uint64_t)n;
     d->integ_a[0][0] = i0; d->integ_a[0][1] = i1; d->integ_a[0][2] = i2;
     d->integ_a[1][0] = q0; d->integ_a[1][1] = q1; d->integ_a[1][2] = q2;
     d->dec_a = dec_a;

@@ -18,6 +18,7 @@
 
 #include "ddc.h"
 #include "font5x7.h"
+#include "jjy.h"
 #include "sdr.h"
 
 static int g_fail;
@@ -385,6 +386,144 @@ int main(void)
               purity[0]);
         printf("        (same without gap compensation: %.1f dB)\n", purity[1]);
         CHECK(purity[0] > purity[1] + 3, "gap compensation makes a difference");
+    }
+
+    printf("[7] JJY frame format\n");
+    {
+        uint8_t f[60];
+        jjy_time t = { 26, 282, 22, 47, 5 }, u;   /* 2026 年第 282 天 22:47，週五 */
+
+        /* 手算的一幀：不靠 jjy_encode，直接對位元 */
+        jjy_encode(&t, f);
+        static const uint8_t MIN[8] = { 1, 0, 0, 0, 0, 1, 1, 1 };     /* 秒 1–8：40 20 10 0 8 4 2 1 -> 47 */
+        static const uint8_t HOUR[7] = { 1, 0, 0, 0, 0, 1, 0 };       /* 秒 12–18：20 10 0 8 4 2 1 -> 22 */
+        int ok = !memcmp(f + 1, MIN, 8) && !memcmp(f + 12, HOUR, 7);
+        /* 282：秒 22–23 = 200,100 -> 1,0；25–28 = 80..10 -> 8 = 1,0,0,0；30–33 = 2 -> 0,0,1,0 */
+        ok = ok && f[22] == 1 && f[23] == 0 && f[25] == 1 && f[26] == 0 && f[27] == 0 && f[28] == 0
+                && f[30] == 0 && f[31] == 0 && f[32] == 1 && f[33] == 0;
+        /* 同位：時 22 -> 位元 1+1 = 偶 -> PA1 = 0；分 47 -> 1+1+1+1 = 偶 -> PA2 = 0 */
+        ok = ok && f[36] == 0 && f[37] == 0;
+        /* 年 26 -> 秒 41–48：0,0,1,0, 0,1,1,0；週五 = 5 -> 秒 50–52：1,0,1 */
+        static const uint8_t YEAR[8] = { 0, 0, 1, 0, 0, 1, 1, 0 };
+        ok = ok && !memcmp(f + 41, YEAR, 8) && f[50] == 1 && f[51] == 0 && f[52] == 1;
+        ok = ok && f[0] == JJY_M && f[9] == JJY_M && f[19] == JJY_M && f[29] == JJY_M
+                && f[39] == JJY_M && f[49] == JJY_M && f[59] == JJY_M;
+        CHECK(ok, "hand-computed frame for 2026/282 22:47 Fri matches bit by bit");
+
+        CHECK(jjy_decode(f, &u) == 0 && u.year == 26 && u.yday == 282 && u.hour == 22 &&
+              u.min == 47 && u.wday == 5, "decode(encode(t)) == t");
+
+        int bad = 0;
+        for (int i = 0; i < 2000; i++) {
+            jjy_time r = { (int)(urand() * 100), 1 + (int)(urand() * 366), (int)(urand() * 24),
+                           (int)(urand() * 60), (int)(urand() * 7) };
+            jjy_encode(&r, f);
+            int cs = (r.min == 15 || r.min == 45);
+            if (jjy_decode(f, &u) != 0 || u.yday != r.yday || u.hour != r.hour ||
+                u.min != r.min || (!cs && (u.year != r.year || u.wday != r.wday)))
+                bad++;
+        }
+        CHECK(bad == 0, "2000 random times round-trip (%d bad)", bad);
+
+        jjy_encode(&t, f); f[36] ^= 1;
+        CHECK(jjy_decode(f, &u) == JJY_E_PARITY, "flipped PA1 -> parity error");
+        jjy_encode(&t, f); f[19] = JJY_0;
+        CHECK(jjy_decode(f, &u) == JJY_E_MARKER, "missing P2 -> marker error");
+        jjy_encode(&t, f); f[15] = 1; f[16] = 1;   /* 時個位 2 -> 14；多兩個 1，同位不變 */
+        CHECK(jjy_decode(f, &u) == JJY_E_RANGE, "hour units > 9 -> range error");
+        jjy_encode(&t, f); f[30] = JJY_ERR;
+        CHECK(jjy_decode(f, &u) == JJY_E_SYMBOL, "unreadable symbol -> error");
+
+        jjy_time c = { 26, 282, 22, 45, 5 };
+        jjy_encode(&c, f);
+        for (int k = 40; k <= 48; k++) f[k] = JJY_ERR;   /* 呼號：這幾秒不是 0/1 */
+        CHECK(jjy_decode(f, &u) == 0 && u.min == 45 && u.year == -1,
+              "minute 45 with call sign in 40-48 still decodes (year = -1)");
+    }
+
+    printf("[8] JJY from a noisy envelope\n");
+    {
+        /* 3.5 分鐘的包絡：高 = 1.0，低 = 0.01（-20 dB），乘上慢衰落與雜訊，
+         * 時間戳每 8.19 ms 一點、每 66.5 ms 跳過 2 ms（鍵盤掃描）。
+         * 起點故意落在一分鐘的第 23.4 秒。 */
+        static jjy j;
+        jjy_init(&j);
+        jjy_time t0 = { 26, 282, 22, 47, 5 };
+        uint8_t f[3][60];
+        for (int m = 0; m < 3; m++) {
+            jjy_time t = t0;
+            t.min += m;
+            jjy_encode(&t, f[m]);
+        }
+        double t_ms = 23400.0, blk = 0;
+        int locked_at = -1;
+        while (t_ms < 3 * 60000.0 + 59000.0) {
+            int m = (int)(t_ms / 60000), sec = (int)(t_ms / 1000) % 60;
+            double in_sec = fmod(t_ms, 1000.0);
+            uint8_t sy = m < 3 ? f[m][sec] : JJY_M;
+            double width = sy == JJY_M ? 200 : sy == JJY_1 ? 500 : 800;
+            double p = in_sec < width ? 1.0 : 0.01;
+            double fade = 0.5 + 0.4 * sin(t_ms / 9000.0);     /* 約 1 分鐘一個週期的衰落 */
+            double noise = -log(urand()) * 0.004;              /* 指數分布：功率雜訊 */
+            jjy_push(&j, (float)(p * fade + noise), (uint32_t)t_ms);
+            if (jjy_locked(&j) && locked_at < 0)
+                locked_at = (int)(t_ms / 1000);
+            t_ms += 8.192;
+            blk += 8.192;
+            if (blk >= 65.5) { blk = 0; t_ms += 2.0; }
+        }
+        printf("        symbols %lu, frames %lu, last err %d, history: %.30s...\n",
+               (unsigned long)j.symbols, (unsigned long)j.frames, j.last_err, j.hist);
+        CHECK(jjy_locked(&j) && j.t.hour == 22 && j.t.min == 49 && j.t.yday == 282,
+              "locked, last decoded 22:%02d (want 22:49), locked at t=%d s", j.t.min, locked_at);
+        CHECK(labs((long)j.t_ms - 2 * 60000L) < 60,
+              "frame timestamp %lu ms (want 120000, the real start of 22:49)", (unsigned long)j.t_ms);
+    }
+
+    printf("[9] JJY end to end: 40 kHz carrier -> DDC -> decoder\n");
+    {
+        /* 真的合成 40 kHz 載波（100% / 10%），加雜訊，切成塊、每塊之間空 1 ms、
+         * 開頭有偏壓暫態，丟進 DDC，再把包絡餵給解碼器。約 2.5 分鐘。 */
+        static ddc d;
+        static jjy j;
+        static int16_t audio[1024];
+        ddc_init(&d);
+        ddc_set(&d, 40000, DDC_CW, 500);
+        jjy_init(&j);
+        jjy_time t0 = { 26, 282, 22, 47, 5 };
+        uint8_t f[3][60];
+        for (int m = 0; m < 3; m++) {
+            jjy_time t = t0;
+            t.min += m;
+            jjy_encode(&t, f[m]);
+        }
+        const int GAP = 480;
+        double t = 50.0;                        /* 從第 50 秒開始 */
+        const double PI2 = 2 * 3.14159265358979323846;
+        while (t < 3 * 60.0 + 3.0) {                /* 22:49 那一幀收到第 180 秒 */
+            t += (double)GAP / SP_FS;
+            for (int i = 0; i < SDR_BLOCK; i++, t += 1.0 / SP_FS) {
+                int m = (int)(t / 60), sec = (int)t % 60;
+                double in_sec = fmod(t, 1.0);
+                uint8_t sy = m < 3 ? f[m][sec] : JJY_M;
+                double width = sy == JJY_M ? 0.2 : sy == JJY_1 ? 0.5 : 0.8;
+                double a = in_sec < width ? 6.0 : 0.6;            /* 6 LSB / 0.6 LSB */
+                double v = 508.0 + 2.0 * grand() + a * sin(PI2 * 40000.0 * t);
+                if (i < SDR_SKIP)
+                    v -= 508.0 * exp(-i / 20.5);
+                long q = lround(v);
+                g_block[i] = (uint16_t)(q < 0 ? 0 : q > 4095 ? 4095 : q);
+            }
+            ddc_block(&d, g_block, SDR_BLOCK, SDR_SKIP, GAP, audio, 1024);
+            for (int k = 0; k < d.env_n; k++)
+                jjy_push(&j, d.env[k], d.env_ms[k] + 50000u);
+        }
+        printf("        symbols %lu, frames %lu, last err %d, history: %.30s...\n",
+               (unsigned long)j.symbols, (unsigned long)j.frames, j.last_err, j.hist);
+        CHECK(jjy_locked(&j) && j.t.hour == 22 && j.t.min == 49,
+              "6 LSB carrier in 2 LSB noise: locked on 22:%02d (want 22:49)", j.t.min);
+        CHECK(labs((long)j.t_ms - 120000L) < 60,
+              "frame timestamp %lu ms (want 120000)", (unsigned long)j.t_ms);
     }
 
     write_glyphs("glyphs.ppm");

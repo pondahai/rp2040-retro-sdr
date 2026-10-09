@@ -40,6 +40,7 @@
 
 extern "C" {
 #include "src/rs_sdr.h"
+#include "src/rs_jjy.h"
 }
 
 // ---- 顯示器（spi0）----
@@ -418,6 +419,10 @@ static void render()
 // ============================================================================
 
 static ddc g_ddc;                          // 只有 Core 1 碰
+// 授時碼解碼器：Core 1 寫，Core 0 只讀（畫面用，讀到一半被改也只是某一格
+// 符號晚一圈才更新，不影響解碼本身）。
+static jjy g_jjy;
+static volatile uint32_t g_env_now;        // 最新一個包絡點的時間戳（ms）
 
 // Core 0 寫、Core 1 讀。改了就把 seq 加一，Core 1 在下一塊開頭套用。
 static volatile int32_t  g_p_tune;
@@ -475,6 +480,7 @@ void setup1()
     while (!g_core0_ready)
         tight_loop_contents();
     ddc_init(&g_ddc);
+    jjy_init(&g_jjy);
     // 鬧鐘池建在 Core 1：中斷就跑在 Core 1，不會被 Core 0 的 FFT 或 SPI 拖慢
     // （PicoApple2 的音訊重放也是這樣做）
     alarm_pool_t *pool = alarm_pool_create_with_unused_hardware_alarm(4);
@@ -493,7 +499,10 @@ void loop1()
     uint32_t seq = g_p_seq;
     if (seq != seq_applied) {
         seq_applied = seq;
+        int32_t old = g_ddc.tune_hz;
         ddc_set(&g_ddc, g_p_tune, g_p_mode, g_p_bw);
+        if (g_p_tune != old)
+            jjy_init(&g_jjy);               // 換台了，前面的符號不算數
     }
 
     uint32_t t0 = time_us_32();
@@ -502,6 +511,11 @@ void loop1()
     int n = ddc_block(&g_ddc, g_buf[idx & 1], SDR_BLOCK, SDR_SKIP, gap, out,
                       (int)(sizeof out / sizeof out[0]));
     g_ddc_us = time_us_32() - t0;
+
+    for (int k = 0; k < g_ddc.env_n; k++)
+        jjy_push(&g_jjy, g_ddc.env[k], g_ddc.env_ms[k]);
+    if (g_ddc.env_n)
+        g_env_now = g_ddc.env_ms[g_ddc.env_n - 1];
 
     for (int i = 0; i < n; i++) {
         if (g_aud_w - g_aud_r >= AUD_N)
@@ -512,6 +526,42 @@ void loop1()
 }
 
 // ============================================================================
+// 授時碼狀態列：調在 JJY（40 / 60 kHz ±500 Hz）上才顯示
+//
+//   JJY 22:49:37 OK  ...M0010M01001  （鎖定：時間每秒往前走）
+//   JJY --:--:--     ...M00?10       （還沒解出來）
+//
+// 時間 = 最近解出的那一幀（代表它的 M 那一刻）＋ 從那一刻到現在的時間。
+// 兩個時間戳都來自 DDC 的取樣計數，所以跟 millis() 無關，也把鍵盤掃描的
+// 空檔算進去了。
+// ============================================================================
+
+static void updateTimecodeLine()
+{
+    int32_t f = g_sdr.tune_hz;
+    if (!((f > 39500 && f < 40500) || (f > 59500 && f < 60500))) {
+        g_sdr.tc[0] = 0;
+        g_sdr.tc_locked = 0;
+        return;
+    }
+    char tbuf[16];
+    const char *flag = "  ";
+    if (g_jjy.good >= 1) {
+        uint32_t el = (g_env_now - g_jjy.t_ms) / 1000;
+        uint32_t secs = (uint32_t)(g_jjy.t.hour * 3600 + g_jjy.t.min * 60) + el;
+        secs %= 86400;
+        snprintf(tbuf, sizeof tbuf, "%02lu:%02lu:%02lu", (unsigned long)(secs / 3600),
+                 (unsigned long)(secs / 60 % 60), (unsigned long)(secs % 60));
+        flag = jjy_locked(&g_jjy) ? "OK" : "? ";
+    } else {
+        strcpy(tbuf, "--:--:--");
+    }
+    // 符號放最右邊，最新的在最後面
+    int room = UI_TEXT_COLS - 17;
+    snprintf(g_sdr.tc, sizeof g_sdr.tc, "JJY %s %s %s", tbuf, flag,
+             g_jjy.hist + JJY_HIST - room);
+    g_sdr.tc_locked = jjy_locked(&g_jjy);
+}
 
 static void pushDdcParams()
 {
@@ -599,6 +649,7 @@ void loop()
         pushDdcParams();
     g_vol = g_sdr.vol;
     testToneSet(g_sdr.tx_on);
+    updateTimecodeLine();
 
     // DSP
     uint32_t t1 = time_us_32();
@@ -644,6 +695,10 @@ void loop()
                           lv / 10, abs(lv % 10), (lv - sp->nf) / 10, abs((lv - sp->nf) % 10),
                           sp->bin_db[b3] / 10, abs(sp->bin_db[b3] % 10), g_sdr.tx_on);
         }
+        if (g_sdr.tc[0])
+            Serial.printf("    %s | span %d dB, sym %lu, frames %lu, err %d\n", g_sdr.tc,
+                          (int)(g_jjy.hi - g_jjy.lo), (unsigned long)g_jjy.symbols,
+                          (unsigned long)g_jjy.frames, g_jjy.last_err);
         Serial.printf("    core1: ddc %lu us/block (fir+demod %lu us, rest %lu us), "
                       "audio fill %lu, underruns %lu\n",
                       (unsigned long)g_ddc_us, (unsigned long)g_ddc.t_post,
