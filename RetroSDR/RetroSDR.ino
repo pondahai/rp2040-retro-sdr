@@ -500,6 +500,7 @@ void setup()
                     SYS_CLOCK_KHZ * 1000, SYS_CLOCK_KHZ * 1000);
     Serial.begin(115200);
     sp_clock_us = time_us_32;
+    ddc_clock_us = time_us_32;
 
     gpio_init(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);
     gpio_init(LATCH_PIN);    gpio_set_dir(LATCH_PIN, GPIO_OUT);
@@ -598,9 +599,11 @@ void loop()
                       (unsigned long)((t3 - t2) / 1000),
                       (unsigned long)(clock_get_hz(clk_sys) / 1000000),
                       sp->nf / 10, abs(sp->nf % 10));
-        Serial.printf("    core1: ddc %lu us/block, audio fill %lu, underruns %lu\n",
-                      (unsigned long)g_ddc_us, (unsigned long)(g_aud_w - g_aud_r),
-                      (unsigned long)g_aud_under);
+        Serial.printf("    core1: ddc %lu us/block (fir+demod %lu us, rest %lu us), "
+                      "audio fill %lu, underruns %lu\n",
+                      (unsigned long)g_ddc_us, (unsigned long)g_ddc.t_post,
+                      (unsigned long)(g_ddc.t_total - g_ddc.t_post),
+                      (unsigned long)(g_aud_w - g_aud_r), (unsigned long)g_aud_under);
         Serial.printf("    draw: prep %lu us, ui_line %lu us, spi wait %lu us | "
                       "clk_peri %lu MHz, spi0 %lu Hz\n",
                       (unsigned long)g_t_prep, (unsigned long)g_t_line,

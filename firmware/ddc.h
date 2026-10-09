@@ -1,7 +1,7 @@
 /* 窄頻 DDC 與解調：一塊 500 ksps 的 ADC 樣本進來，7812.5 Hz 的音訊出去。
  *
- *   x ─→ NCO 混頻 ─→ CIC³ ÷64 ─→ FIR（通道濾波）─→ 解調 ─→ AGC ─→ 音訊
- *        (e^{-j2πf_LO t})   int64 積分器     127 階，複數
+ *   x ─→ NCO 混頻 ─→ CIC³ ÷8 ─→ CIC³ ÷8 ─→ FIR（通道濾波）─→ 解調 ─→ AGC ─→ 音訊
+ *        (e^{-j2πf_LO t})  int32       int64      127 階，對稱
  *
  * 四種模式用同一條鏈，差別只在本振放哪裡、濾波器多寬、最後怎麼取：
  *
@@ -12,9 +12,14 @@
  *
  * 為什麼 ÷64 而不是 ÷62.5 到 8 kHz：整數抽取，一塊 32768 點剛好 512 個音訊樣本。
  *
- * 為什麼積分器用 int64：12 位元輸入 × q14 本振 = 26 位元，三階 CIC ÷64 再長
- * 18 位元 = 44 位元。CIC 靠模數運算吃溢位，但前提是暫存器夠寬裝得下輸出。
- * M0+ 的 64 位元加法是 adds/adcs 兩條指令，不貴。
+ * 為什麼拆兩級 ÷8：CIC 靠模數運算吃溢位，前提是暫存器裝得下**輸出**。
+ * 單級 ÷64 要 44 位元，只能用 int64，而 M0+ 只有 8 個低位暫存器，六個 int64
+ * 積分器一直搬進搬出 —— 上機實測每個輸入樣本 135 週期，18 ms/塊。
+ * 拆成兩級之後，跑在 500 kHz 的第一級只長 9 位元：樣本（扣 DC 後最大約
+ * ±3587，12 位元）× q10 本振 × 2^9 < 2^31，int32 就夠；int64 只留給
+ * 62.5 kHz 的第二級，次數少 8 倍。
+ * 兩級 CIC³(÷8) 串接的響應與單級 CIC³(÷64) **完全相同**（sinc 比值相乘，
+ * 中間項互消），濾波特性不變。
  *
  * 純 C，不知道板子存在（test_pc.c 驗證）。板子上跑在 Core 1。
  */
@@ -43,7 +48,11 @@ typedef struct {
     uint32_t bfo_phase, bfo_step;       /* 7812.5 Hz 下，把基頻搬回音訊 */
     int      conj;                      /* LSB 要翻頻 */
 
-    /* CIC */
+    /* CIC 第一級（500 kHz，int32；用 uint32 讓溢位有定義） */
+    uint32_t integ_a[2][3];
+    uint32_t comb_a[2][3];
+    int      dec_a;
+    /* CIC 第二級（62.5 kHz，int64） */
     int64_t  integ[2][3];
     int64_t  comb[2][3];
     int      dec;
@@ -57,7 +66,13 @@ typedef struct {
     float    am_dc;                     /* AM 去 DC 的慢平均 */
     float    agc_env;                   /* AGC 的包絡 */
     float    level;                     /* 通帶內的訊號強度（給 S 表），線性 */
+
+    /* 上一塊的耗時（µs）：整塊、其中 FIR＋解調的部分。ddc_clock_us 沒設就是 0。 */
+    uint32_t t_total, t_post;
 } ddc;
+
+/* 量時間用的時鐘，同 spectrum.h 的 sp_clock_us。 */
+extern uint32_t (*ddc_clock_us)(void);
 
 void ddc_init(ddc *d);
 
