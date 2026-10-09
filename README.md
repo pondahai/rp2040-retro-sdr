@@ -5,14 +5,14 @@ RP2040 掌機上的 LF 直接取樣 SDR：0–250 kHz 的頻譜與瀑布圖，�
 
 [rp2040-retro-handheld](https://github.com/pondahai/rp2040-retro-handheld)
 生態系的一員。主板不用改，只在 GPIO 26 加 3 顆被動元件，鍵盤照常能用。
-完整設計見 [docs/DESIGN.md](docs/DESIGN.md)。
+完整設計見 [docs/DESIGN.md](docs/DESIGN.md)，開發過程與實測數字見 [docs/DEVLOG.md](docs/DEVLOG.md)。
 
 ## 目前進度
 
 | | 內容 | 狀態 |
 | :--- | :--- | :--- |
-| **M1** | ADC 取樣、寬頻 FFT、頻譜＋瀑布圖、鍵盤分時 | **程式完成、PC 測試通過；尚未上機** |
-| M2 | 窄頻 DDC、CW／AM 解調、喇叭出聲 | |
+| **M1** | ADC 取樣、寬頻 FFT、頻譜＋瀑布圖、鍵盤分時 | **已上機：每塊 60 ms、不掉塊** |
+| **M2** | 窄頻 DDC、AM／CW／USB／LSB 解調、喇叭出聲 | **已上機：喇叭出聲、無斷音** |
 | M3 | BPC／JJY 解碼 | |
 | M4 | SD 卡錄音、預設清單 | |
 | M5 | 封面、偏移編譯、收進 bundle | |
@@ -28,7 +28,7 @@ RP2040 掌機上的 LF 直接取樣 SDR：0–250 kHz 的頻譜與瀑布圖，�
 
 天線是 3–10 m 的電線，越長越好。為什麼偏壓是 0.41 V 而不是中點，見 DESIGN.md §1.1。
 
-## 畫面與按鍵（M1）
+## 畫面與按鍵
 
 ![M1 畫面（PC 模擬）](docs/m1_screen.png)
 
@@ -38,12 +38,16 @@ RP2040 掌機上的 LF 直接取樣 SDR：0–250 kHz 的頻譜與瀑布圖，�
 
 | 按鍵 | 功能 |
 | :--- | :--- |
-| D-pad ← → ／ `h` `l`（`H` `L` 一次 10 格） | 移動游標 |
+| D-pad ← → ／ `h` `l`（`H` `L` 一次 10 步） | 調諧 |
+| START ／ `s` | 調諧步進：10／100／1k／10k Hz |
+| SELECT ／ `m` | 解調模式：AM → CW → USB → LSB |
+| `b` | 通帶寬度（依模式） |
+| A ／ B ／ `=` `-` | 音量 0–10 |
 | D-pad ↑ ↓ ／ `k` `j` | 參考位準 ±5 dB |
-| A ／ B ／ `]` `[` | 顯示範圍 ±20 dB |
-| SELECT ／ `a` | 平均檔位（1、2、4、4+指數、7+指數 段 FFT） |
-| START ／ `p` | 峰值保持開關 |
-| `0`–`9` `.` Enter | 直接輸入頻率（kHz），Esc 取消 |
+| `]` `[` | 顯示範圍 ±20 dB |
+| `a` | 平均檔位（1、2、4、4+指數、7+指數 段 FFT） |
+| `p` | 峰值保持開關 |
+| `0`–`9` `.` Enter | 直接輸入頻率（kHz，最多三位小數），Esc 取消 |
 | `q` | QUIET：暫停 LCD 更新，用來比較 SPI 對雜訊底線的影響 |
 
 鍵盤矩陣上已經沒有方向鍵（retro-dict 的 HANDOVER 有記載），所以方向靠 D-pad。
@@ -66,6 +70,7 @@ firmware/          純 C，PC 與板子共用
   fft.c            4096 點複數 FFT，int16 區塊浮點
   spectrum.c       去 DC、Hann 窗、多段平均、像素合併、雜訊底線
   wfall.c          瀑布圖環形緩衝與調色盤
+  ddc.c            窄頻 DDC 與解調（Core 1）
   sdr.c            狀態機：按鍵、版面文字
   ui.c             逐列產生 RGB565
   font5x7.c        自繪的 5×7 ASCII 字型

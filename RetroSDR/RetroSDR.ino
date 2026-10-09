@@ -1,11 +1,14 @@
 // ============================================================================
-// RetroSDR —— RP2040 掌機上的 LF 直接取樣 SDR（M1：寬頻頻譜＋瀑布圖）
+// RetroSDR —— RP2040 掌機上的 LF 直接取樣 SDR
 //
-// 這支 sketch 只做三件事：
-//
+// Core 0：
 //   1. GPIO 26 分時：ADC 抓一整塊 -> 切回 GPIO 掃鍵盤 -> 再切回 ADC
 //   2. 抓好的那一塊交給 sdr.c（FFT、雜訊底線、瀑布圖）
 //   3. 逐列向 ui.c 要畫面，DMA 送上 ILI9341
+//
+// Core 1（M2）：
+//   4. 同一塊樣本交給 ddc.c（混頻、CIC、FIR、解調、AGC）-> 音訊環形緩衝
+//   5. 計時中斷每 128 µs 取一個樣本寫進 GPIO 7 的 PWM -> PAM8403 -> 喇叭
 //
 // **DSP 與畫面邏輯一行都不在這裡。** fft.c、spectrum.c、wfall.c、sdr.c、
 // ui.c 都是純 C，在 PC 上用合成訊號跑過（firmware/test_pc.c）。
@@ -29,6 +32,8 @@
 #include "hardware/adc.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
+#include "hardware/pwm.h"
+#include "hardware/clocks.h"
 #include "hardware/timer.h"
 
 #include "TFT_DMA.h"
@@ -54,6 +59,14 @@ extern "C" {
 #define CLOCK_PIN        26
 #define DATA_IN_PIN      27
 
+// ---- 喇叭 ----
+// 與 retro-dict / InfoNES 同一支腳。PWM 載波 500 kHz，跟 ADC 取樣率相同，
+// 經 500 ksps 取樣後會摺疊到 DC，被 FFT 去 DC 與 DDC 濾掉（DESIGN.md §4.3）。
+// 前提是 clk_sys 為 250 MHz：250 MHz / 500 = 500 kHz。改時脈要一起改 wrap。
+#define PIN_SPEAKER      7
+#define PWM_WRAP         499
+#define PWM_MID          250
+
 // ---- 遊戲按鍵（active-low、內部上拉）----
 #define PIN_BTN_UP       9
 #define PIN_BTN_DOWN     5
@@ -72,6 +85,14 @@ static keys     g_keys;
 static uint16_t g_buf[2][SDR_BLOCK];       // 2 × 64 KB，ADC 雙緩衝
 static uint16_t g_line[2][UI_W];           // 一列算、一列送
 static int      g_cur;                      // DMA 正在寫哪一塊
+
+// 系統時脈。arduino-pico 預設 133 MHz，M1 第一次上機量到一塊要 139 ms
+// （一塊只有 65 ms），所以比照 PicoApple2 超頻到 250 MHz。
+//
+// 改這個數字不影響取樣率：clk_adc 來自 PLL_USB 的 48 MHz，跟 clk_sys 無關。
+// SPI 的 62.5 MHz 在 spi_set_baudrate() 時依新的 clk_peri 重算，250 MHz 下
+// 剛好整除。M2 的音訊 PWM 才會跟它綁在一起（DESIGN.md §2.2）。
+#define SYS_CLOCK_KHZ 250000
 
 // ============================================================================
 // ADC：500 ksps，DMA 一次抓 SDR_BLOCK 點
@@ -206,12 +227,12 @@ static void scanMatrix(uint8_t rows[8])
 static const struct { uint8_t gpio; uint8_t code; uint8_t repeat; } BTN[] = {
     { PIN_BTN_UP,     KEY_UP    , 1 },     // 參考位準 +5 dB
     { PIN_BTN_DOWN,   KEY_DOWN  , 1 },     // 參考位準 -5 dB
-    { PIN_BTN_LEFT,   KEY_LEFT  , 1 },     // 游標
+    { PIN_BTN_LEFT,   KEY_LEFT  , 1 },     // 調諧
     { PIN_BTN_RIGHT,  KEY_RIGHT , 1 },
-    { PIN_BTN_A,      KEY_PGUP  , 0 },     // 範圍 +20 dB
-    { PIN_BTN_B,      KEY_PGDN  , 0 },     // 範圍 -20 dB
-    { PIN_BTN_SELECT, 'a'       , 0 },     // 平均檔位
-    { PIN_BTN_START,  'p'       , 0 },     // 峰值保持
+    { PIN_BTN_A,      KEY_PGUP  , 1 },     // 音量 +
+    { PIN_BTN_B,      KEY_PGDN  , 1 },     // 音量 -
+    { PIN_BTN_SELECT, 'm'       , 0 },     // 解調模式
+    { PIN_BTN_START,  's'       , 0 },     // 調諧步進
 };
 #define BTN_N ((int)(sizeof BTN / sizeof BTN[0]))
 
@@ -323,25 +344,162 @@ static void displayBegin()
 }
 
 // 整張畫面約 20 ms（153 KB @ 62.5 MHz）。算下一列與 DMA 送這一列同時進行。
+// 畫面時間拆成「算像素」與「等 SPI」，診斷用（每秒印一次）。
+static uint32_t g_t_prep, g_t_line, g_t_wait;
+
 static void render()
 {
+    uint32_t t0 = time_us_32();
     sdr_prepare(&g_sdr);
+    uint32_t t1 = time_us_32(), tl = 0, tw = 0;
     tft.startFrame(0, 0, UI_W - 1, UI_H - 1);
     for (int y = 0; y < UI_H; y++) {
         uint16_t *buf = g_line[y & 1];
+        uint32_t a = time_us_32();
         ui_line(&g_sdr, y, buf);
+        uint32_t b = time_us_32();
         tft.waitTransferDone();
+        tw += time_us_32() - b;
+        tl += b - a;
         tft.sendScanlineAsync(buf, UI_W);
     }
+    uint32_t b = time_us_32();
     tft.waitTransferDone();
+    tw += time_us_32() - b;
     digitalWrite(PIN_DISPLAY_CS, HIGH);
+    g_t_prep = t1 - t0;
+    g_t_line = tl;
+    g_t_wait = tw;
+}
+
+// ============================================================================
+// Core 1：DDC 與音訊
+//
+// Core 0 每抓完一塊就把緩衝區編號丟進跨核 FIFO。那一塊要等下一塊抓完（65 ms
+// 之後）才會被 DMA 覆寫，Core 1 只要在那之前做完就好 —— 實測見序列埠的 ddc。
+//
+// 音訊的產出是一陣一陣的（每 66.5 ms 一次 512 個），播放是等速的。塊與塊
+// 之間有鍵盤掃描的空隙，產出率比 7812.5 Hz 略低約 1.6%，所以播放間隔會依
+// 環形緩衝的水位在 127/128/130 µs 之間微調，不讓它見底也不讓它溢出。
+// ============================================================================
+
+static ddc g_ddc;                          // 只有 Core 1 碰
+
+// Core 0 寫、Core 1 讀。改了就把 seq 加一，Core 1 在下一塊開頭套用。
+static volatile int32_t  g_p_tune;
+static volatile int      g_p_mode, g_p_bw;
+static volatile uint32_t g_p_seq;
+static volatile int      g_vol;            // 0..SDR_VOL_MAX
+static volatile bool     g_core0_ready;
+
+#define AUD_N 2048                         // 2 的次方
+static int16_t           g_aud[AUD_N];
+static volatile uint32_t g_aud_w, g_aud_r; // 只增不減，相減就是水位
+static volatile uint32_t g_aud_under;      // 播放時沒東西可播的次數
+static volatile uint32_t g_ddc_us;         // Core 1 處理一塊花多久
+
+static uint s_pwm_slice, s_pwm_chan;
+
+static int64_t audioTick(alarm_id_t, void *)
+{
+    uint32_t fill = g_aud_w - g_aud_r;
+    int level = PWM_MID;
+    if (fill) {
+        int32_t v = g_aud[g_aud_r & (AUD_N - 1)];
+        g_aud_r = g_aud_r + 1;
+        // ±32767 × 音量 -> ±(PWM_MID-1)
+        level += (int)(v * g_vol * (PWM_MID - 1) / (32767 * SDR_VOL_MAX));
+    } else {
+        g_aud_under = g_aud_under + 1;
+    }
+    pwm_set_chan_level(s_pwm_slice, s_pwm_chan, (uint16_t)level);
+
+    // 負值 = 以上一次的預定時間為準再過這麼久（不累積誤差）
+    //
+    // 水位要停在一塊（512）以上：產出是每 66.5 ms 一次倒進 512 個，兩次之間
+    // 要撐得住。第一版門檻設在 256，上機實測每秒見底約 56 次（喀喀聲）。
+    // 停在 768 附近 = 約 0.1 s 的延遲，換來不斷音。
+    if (fill < 768)  return -135;          // 7407 Hz，明顯比產出（約 7580）慢 -> 回升
+    if (fill > 1280) return -127;          // 7874 Hz，比產出快一點 -> 水位下降
+    return -128;
+}
+
+static void audioBegin()
+{
+    gpio_set_function(PIN_SPEAKER, GPIO_FUNC_PWM);
+    s_pwm_slice = pwm_gpio_to_slice_num(PIN_SPEAKER);
+    s_pwm_chan = pwm_gpio_to_channel(PIN_SPEAKER);
+    pwm_config cfg = pwm_get_default_config();
+    pwm_config_set_clkdiv(&cfg, 1.0f);
+    pwm_config_set_wrap(&cfg, PWM_WRAP);
+    pwm_init(s_pwm_slice, &cfg, true);
+    pwm_set_chan_level(s_pwm_slice, s_pwm_chan, PWM_MID);
+}
+
+void setup1()
+{
+    while (!g_core0_ready)
+        tight_loop_contents();
+    ddc_init(&g_ddc);
+    // 鬧鐘池建在 Core 1：中斷就跑在 Core 1，不會被 Core 0 的 FFT 或 SPI 拖慢
+    // （PicoApple2 的音訊重放也是這樣做）
+    alarm_pool_t *pool = alarm_pool_create_with_unused_hardware_alarm(4);
+    alarm_pool_add_alarm_in_us(pool, 128, audioTick, NULL, true);
+}
+
+void loop1()
+{
+    static uint32_t seq_applied;
+    static int16_t out[SDR_BLOCK / DDC_DECIM];
+    uint32_t idx;
+
+    if (!rp2040.fifo.pop_nb(&idx))
+        return;
+
+    uint32_t seq = g_p_seq;
+    if (seq != seq_applied) {
+        seq_applied = seq;
+        ddc_set(&g_ddc, g_p_tune, g_p_mode, g_p_bw);
+    }
+
+    uint32_t t0 = time_us_32();
+    // FIFO 的一個 word：bit 0 = 緩衝區編號，其餘 = 這一塊之前的空檔（取樣點數）
+    int gap = (int)(idx >> 1);
+    int n = ddc_block(&g_ddc, g_buf[idx & 1], SDR_BLOCK, SDR_SKIP, gap, out,
+                      (int)(sizeof out / sizeof out[0]));
+    g_ddc_us = time_us_32() - t0;
+
+    for (int i = 0; i < n; i++) {
+        if (g_aud_w - g_aud_r >= AUD_N)
+            break;                          // 滿了就丟（正常不會發生）
+        g_aud[g_aud_w & (AUD_N - 1)] = out[i];
+        g_aud_w = g_aud_w + 1;
+    }
 }
 
 // ============================================================================
 
+static void pushDdcParams()
+{
+    g_p_tune = g_sdr.tune_hz;
+    g_p_mode = g_sdr.mode;
+    g_p_bw = g_sdr.bw_hz;
+    g_p_seq = g_p_seq + 1;
+    g_sdr.ddc_dirty = 0;
+}
+
 void setup()
 {
+    // 要在任何周邊設定之前：SPI 的除頻是依當下的 clk_peri 算的
+    set_sys_clock_khz(SYS_CLOCK_KHZ, true);
+    // arduino-pico 把 clk_peri 接在 48 MHz 的 USB PLL 上，SPI 最快只有
+    // clk_peri/2 = 24 MHz —— 上機實測 spi0 = 24 MHz，一張畫面光等 SPI 就
+    // 48 ms。改接 clk_sys 之後 62.5 MHz 才真的拿得到（250/4）。
+    // 這支韌體沒有用 UART，換 clk_peri 不影響別的東西；USB 用的是 clk_usb。
+    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                    SYS_CLOCK_KHZ * 1000, SYS_CLOCK_KHZ * 1000);
     Serial.begin(115200);
+    sp_clock_us = time_us_32;
 
     gpio_init(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);
     gpio_init(LATCH_PIN);    gpio_set_dir(LATCH_PIN, GPIO_OUT);
@@ -357,6 +515,10 @@ void setup()
     sdr_init(&g_sdr);
     keys_init(&g_keys);
     adcSetup();
+    audioBegin();
+    g_vol = g_sdr.vol;
+    pushDdcParams();
+    g_core0_ready = true;
 
     render();                                     // 開機先有畫面，不等第一塊
     g_cur = 0;
@@ -382,6 +544,14 @@ void loop()
     g_cur ^= 1;
     captureStart(g_buf[g_cur]);
     g_sdr.scan_us = time_us_32() - t0;
+    // 新的這一塊（g_cur）之前空了 scan_us 這麼久，換算成 500 ksps 的點數，
+    // 跟著「剛抓好的那一塊」一起交給 Core 1 —— Core 1 處理下一塊時會用到。
+    // 剛抓好的那一塊在下一塊抓完之前都不會被覆寫。
+    {
+        static uint32_t gap_before_done;
+        rp2040.fifo.push_nb((uint32_t)done | (gap_before_done << 1));
+        gap_before_done = g_sdr.scan_us / 2;
+    }
 
     // 按鍵
     key_event ev[KEYS_MAX_EVENTS];
@@ -390,9 +560,14 @@ void loop()
     n = dpadPoll(n, ev, KEYS_MAX_EVENTS);
     for (int i = 0; i < n; i++)
         sdr_key(&g_sdr, &ev[i]);
+    if (g_sdr.ddc_dirty)
+        pushDdcParams();
+    g_vol = g_sdr.vol;
 
     // DSP
+    uint32_t t1 = time_us_32();
     sdr_block(&g_sdr, g_buf[done], SDR_BLOCK, SDR_SKIP);
+    uint32_t t2 = time_us_32();
 
     // 畫面。QUIET 模式只畫一次（讓使用者看到 QUIET 字樣），之後完全不碰
     // SPI —— 用來比較「LCD 在送」與「LCD 安靜」時的雜訊底線差多少。
@@ -405,13 +580,32 @@ void loop()
         painted_quiet = true;
     }
 
-    g_sdr.proc_ms = (time_us_32() - t0) / 1000;   // 掃描＋DSP＋畫面，下一張才顯示
+    uint32_t t3 = time_us_32();
+    g_sdr.proc_ms = (t3 - t0) / 1000;             // 掃描＋DSP＋畫面，下一張才顯示
 
+    // 每秒一行，拆開各段時間：要優化哪一邊，看這裡
     if (now - last_log >= 1000) {
+        const spectrum *sp = &g_sdr.sp;
         last_log = now;
-        Serial.printf("blk %lu  proc %lu ms  scan %lu us  drops %lu  NF %d.%d dBFS\n",
-                      (unsigned long)g_sdr.blocks, (unsigned long)g_sdr.proc_ms,
-                      (unsigned long)g_sdr.scan_us, (unsigned long)g_sdr.drops,
-                      g_sdr.sp.nf / 10, abs(g_sdr.sp.nf % 10));
+        Serial.printf("blk %lu drops %lu | proc %lu ms = scan %lu us + dsp %lu ms "
+                      "(K=%d: win %lu fft %lu db %lu post %lu us) + draw %lu ms "
+                      "| %lu MHz | NF %d.%d dBFS\n",
+                      (unsigned long)g_sdr.blocks, (unsigned long)g_sdr.drops,
+                      (unsigned long)g_sdr.proc_ms, (unsigned long)g_sdr.scan_us,
+                      (unsigned long)((t2 - t1) / 1000), sp->k_used,
+                      (unsigned long)sp->t_win, (unsigned long)sp->t_fft,
+                      (unsigned long)sp->t_db, (unsigned long)sp->t_post,
+                      (unsigned long)((t3 - t2) / 1000),
+                      (unsigned long)(clock_get_hz(clk_sys) / 1000000),
+                      sp->nf / 10, abs(sp->nf % 10));
+        Serial.printf("    core1: ddc %lu us/block, audio fill %lu, underruns %lu\n",
+                      (unsigned long)g_ddc_us, (unsigned long)(g_aud_w - g_aud_r),
+                      (unsigned long)g_aud_under);
+        Serial.printf("    draw: prep %lu us, ui_line %lu us, spi wait %lu us | "
+                      "clk_peri %lu MHz, spi0 %lu Hz\n",
+                      (unsigned long)g_t_prep, (unsigned long)g_t_line,
+                      (unsigned long)g_t_wait,
+                      (unsigned long)(clock_get_hz(clk_peri) / 1000000),
+                      (unsigned long)spi_get_baudrate(spi0));
     }
 }

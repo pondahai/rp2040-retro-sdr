@@ -27,7 +27,14 @@ typedef struct {
     int     ema_shift;                  /* 0 = 不做指數平均 */
     int     k_used;                     /* 這一塊實際做了幾段 FFT */
     int     primed;                     /* 第一塊直接拷貝，不從 0 慢慢爬上來 */
+
+    /* 上一塊各階段花的時間（µs）。sp_clock_us 沒設就全是 0。 */
+    uint32_t t_win, t_fft, t_db, t_post;
 } spectrum;
+
+/* 量時間用的時鐘。板子上設成 time_us_32，PC 上留 NULL。
+ * 放成函式指標而不是直接呼叫，這一層才不必知道 SDK 存在。 */
+extern uint32_t (*sp_clock_us)(void);
 
 void spectrum_init(spectrum *sp);
 

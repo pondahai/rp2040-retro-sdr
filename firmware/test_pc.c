@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ddc.h"
 #include "font5x7.h"
 #include "sdr.h"
 
@@ -153,6 +154,22 @@ int main(void)
               worst / 10, abs(worst % 10), wb);
     }
 
+    printf("[1b] real-FFT split: no mirror image\n");
+    {
+        /* 拆分寫錯的典型症狀：在 M−k 冒出一個鏡像。挑高頻的 bin 1500，
+         * 鏡像會落在 548，兩邊都看。 */
+        int b = 1500, img = FFT_M - b;
+        tone t = { (double)b * SP_FS / SP_N, 2047.0 };
+        sdr_init(s);
+        synth(2048.0, 0.0, &t, 1);
+        sdr_block(s, g_block, SDR_BLOCK, SDR_SKIP);
+        int v = s->sp.bin_db[b], m = s->sp.bin_db[img];
+        CHECK(v >= -3 && v <= 3, "sine at bin %d reads %d.%d dBFS (want 0 +-0.3)",
+              b, v / 10, abs(v % 10));
+        CHECK(m < -680, "mirror bin %d reads %d.%d dBFS (want < -68)",
+              img, m / 10, abs(m % 10));
+    }
+
     printf("[2] noise floor\n");
     {
         double sigma = 2.0;
@@ -211,26 +228,163 @@ int main(void)
     printf("[4] keys\n");
     {
         sdr_init(s);
+        CHECK(s->tune_hz == 68500 && s->cursor == 87, "starts on BPC (tune %ld, cursor %d)",
+              (long)s->tune_hz, s->cursor);
+        s->ddc_dirty = 0;
         type(s, "250");
         press(s, KEY_ENTER);
-        CHECK(s->cursor == 88, "out-of-range entry leaves cursor alone (cursor %d, want 88)",
-              s->cursor);
+        CHECK(s->tune_hz == 68500 && !s->ddc_dirty,
+              "out-of-range entry is ignored (tune %ld)", (long)s->tune_hz);
         type(s, "1.2.3");
         press(s, KEY_ENTER);
-        CHECK(s->cursor == 88, "malformed entry is ignored (cursor %d)", s->cursor);
+        CHECK(s->tune_hz == 68500, "malformed entry is ignored (tune %ld)", (long)s->tune_hz);
         type(s, "200");
         press(s, KEY_ESC);
-        CHECK(!s->entering && s->cursor == 88, "ESC cancels entry");
+        CHECK(!s->entering && s->tune_hz == 68500, "ESC cancels entry");
+        type(s, "40.0125");
+        press(s, KEY_ENTER);
+        CHECK(s->tune_hz == 68500, "more than 3 decimals is rejected (tune %ld)",
+              (long)s->tune_hz);
+        type(s, "40.012");
+        press(s, KEY_ENTER);
+        CHECK(s->tune_hz == 40012 && s->ddc_dirty, "40.012 -> 40012 Hz (got %ld)",
+              (long)s->tune_hz);
         press(s, 'L');
-        CHECK(s->cursor == 98, "L moves +10 (cursor %d)", s->cursor);
+        CHECK(s->tune_hz == 41012, "L tunes +10 steps (got %ld)", (long)s->tune_hz);
         press(s, KEY_LEFT);
-        CHECK(s->cursor == 97, "LEFT moves -1 (cursor %d)", s->cursor);
+        CHECK(s->tune_hz == 40912, "LEFT tunes -1 step (got %ld)", (long)s->tune_hz);
+        press(s, 's');
+        CHECK(s->step_hz == 1000 && s->tune_hz == 41000,
+              "S cycles step to 1000 and snaps (step %d, tune %ld)", s->step_hz,
+              (long)s->tune_hz);
+        for (int i = 0; i < 100; i++)
+            press(s, KEY_LEFT);
+        CHECK(s->tune_hz == 0 && s->cursor == 0, "tuning clamps at 0 Hz");
+        press(s, 'm');
+        CHECK(s->mode == DDC_USB && s->bw_hz == 2400, "M cycles CW -> USB with its default BW");
+        press(s, 'b');
+        CHECK(s->bw_hz == 2700, "B cycles bandwidth (got %d)", s->bw_hz);
+        for (int i = 0; i < 20; i++)
+            press(s, KEY_PGUP);
+        CHECK(s->vol == SDR_VOL_MAX, "volume caps at %d", SDR_VOL_MAX);
         for (int i = 0; i < 40; i++)
             press(s, KEY_DOWN);
         CHECK(s->ref_db == -140, "REF floors at -140 (got %d)", s->ref_db);
         for (int i = 0; i < 10; i++)
-            press(s, KEY_PGUP);
+            press(s, ']');
         CHECK(s->range_db == 120, "RANGE caps at 120 (got %d)", s->range_db);
+    }
+
+    printf("[5] DDC / demodulation\n");
+    {
+        static ddc d;
+        static int16_t audio[1024];
+        struct {
+            const char *name;
+            int mode;
+            tone t[3];
+            int nt;
+            double want_hz;       /* 音訊裡應該出現的頻率 */
+            double image_hz;      /* 反邊帶若沒濾掉會出現在這裡（0 = 不檢查） */
+        } cases[] = {
+            { "CW  carrier at tune      -> 800 Hz", DDC_CW,
+              { { 68500, 20 } }, 1, 800, 0 },
+            { "USB tone at tune+1000    -> 1000 Hz", DDC_USB,
+              { { 69500, 20 } }, 1, 1000, 0 },
+            { "USB rejects tune-1000 (LSB side)", DDC_USB,
+              { { 67500, 20 }, { 69700, 2 } }, 2, 1200, 1000 },
+            { "LSB tone at tune-1000    -> 1000 Hz", DDC_LSB,
+              { { 67500, 20 } }, 1, 1000, 0 },
+            { "AM  carrier + 1 kHz, m=0.5 -> 1000 Hz", DDC_AM,
+              { { 68500, 40 }, { 67500, 10 }, { 69500, 10 } }, 3, 1000, 0 },
+        };
+        const double afs = DDC_AFS_X2 / 2.0;
+        for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            ddc_init(&d);
+            ddc_set(&d, 68500, cases[c].mode, ddc_default_bw(cases[c].mode));
+            g_t = 0;
+            int got = 0;
+            for (int blk = 0; blk < 6; blk++) {   /* 前幾塊讓 FIR、AGC 穩下來 */
+                synth(508.0, 2.0, cases[c].t, cases[c].nt);
+                got = ddc_block(&d, g_block, SDR_BLOCK, 0, 0, audio, 1024);
+            }
+            /* Goertzel：目標頻率的功率 vs 300..3500 Hz 其他地方的最大值 */
+            double pw_want = 0, pw_other = 0, pw_img = 0;
+            for (int f = 300; f <= 3500; f += 50) {
+                double w = 2 * 3.14159265358979323846 * f / afs, cw = 2 * cos(w);
+                double s0 = 0, s1 = 0, s2 = 0;
+                for (int i = 0; i < got; i++) {
+                    s0 = audio[i] + cw * s1 - s2;
+                    s2 = s1; s1 = s0;
+                }
+                double pw = s1 * s1 + s2 * s2 - cw * s1 * s2;
+                if (fabs(f - cases[c].want_hz) < 1)
+                    pw_want = pw;
+                else if (cases[c].image_hz && fabs(f - cases[c].image_hz) < 1)
+                    pw_img = pw;
+                else if (fabs(f - cases[c].want_hz) > 150 && pw > pw_other)
+                    pw_other = pw;
+            }
+            double ratio = 10 * log10((pw_want + 1e-9) / (pw_other + 1e-9));
+            CHECK(got == SDR_BLOCK / DDC_DECIM && ratio > 20,
+                  "%s: %d samples, %.1f dB above anything else", cases[c].name, got, ratio);
+            if (cases[c].image_hz) {
+                double rej = 10 * log10((pw_want + 1e-9) / (pw_img + 1e-9));
+                /* 想要的那個只有 2 LSB、不要的有 20 LSB（強 20 dB）：
+                 * 濾掉之後想要的仍比較大，才算真的拒斥了 */
+                CHECK(rej > 10, "    image at %.0f Hz is %.1f dB below the wanted tone",
+                      cases[c].image_hz, rej);
+            }
+        }
+    }
+
+    printf("[6] DDC across block boundaries (scan gap + bias transient)\n");
+    {
+        /* 上機實況：塊與塊之間空了約 1 ms（鍵盤掃描），每塊開頭偏壓從 0 V
+         * 爬回 0.41 V（τ ≈ 41 µs ≈ 20 點）。把好幾塊的音訊接起來看 CW 嗶聲
+         * 乾不乾淨。gap 給對 vs 給 0 各跑一次：給 0 應該明顯比較髒。 */
+        static ddc d;
+        static int16_t audio[4096];
+        const int GAP = 480;
+        tone t = { 68500, 20 };
+        const double afs = DDC_AFS_X2 / 2.0;
+        double purity[2];
+        for (int pass = 0; pass < 2; pass++) {
+            ddc_init(&d);
+            ddc_set(&d, 68500, DDC_CW, 500);
+            g_t = 0;
+            int got = 0;
+            for (int blk = 0; blk < 10; blk++) {
+                g_t += (double)GAP / SP_FS;                  /* 空檔：真實時間照走 */
+                synth(508.0, 2.0, &t, 1);
+                for (int i = 0; i < SDR_SKIP; i++)          /* 偏壓回穩的暫態 */
+                    g_block[i] = (uint16_t)lround(g_block[i] - 508.0 * exp(-i / 20.5));
+                int n = ddc_block(&d, g_block, SDR_BLOCK, SDR_SKIP,
+                                  pass == 0 ? GAP : 0, audio + (blk >= 4 ? got : 0),
+                                  (int)(sizeof audio / sizeof audio[0]) - got);
+                if (blk >= 4)
+                    got += n;
+            }
+            double pw_want = 0, pw_other = 0;
+            for (int f = 300; f <= 3500; f += 25) {
+                double w = 2 * 3.14159265358979323846 * f / afs, cw = 2 * cos(w);
+                double s0 = 0, s1 = 0, s2 = 0;
+                for (int i = 0; i < got; i++) {
+                    s0 = audio[i] + cw * s1 - s2;
+                    s2 = s1; s1 = s0;
+                }
+                double pw = s1 * s1 + s2 * s2 - cw * s1 * s2;
+                if (f == DDC_CW_PITCH)
+                    pw_want = pw;
+                else if (abs(f - DDC_CW_PITCH) > 100 && pw > pw_other)
+                    pw_other = pw;
+            }
+            purity[pass] = 10 * log10((pw_want + 1e-9) / (pw_other + 1e-9));
+        }
+        CHECK(purity[0] > 25, "6 blocks stitched, gap compensated: tone %.1f dB above junk",
+              purity[0]);
+        printf("        (same without gap compensation: %.1f dB)\n", purity[1]);
+        CHECK(purity[0] > purity[1] + 3, "gap compensation makes a difference");
     }
 
     write_glyphs("glyphs.ppm");

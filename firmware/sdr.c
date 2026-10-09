@@ -29,7 +29,11 @@ void sdr_init(sdr *s)
     memset(s, 0, sizeof(*s));
     spectrum_init(&s->sp);
     wfall_init(&s->wf);
-    s->cursor = 88;                   /* 約 68.75 kHz，BPC 附近 */
+    s->step_hz = 100;
+    s->mode = DDC_CW;
+    s->bw_hz = ddc_default_bw(DDC_CW);
+    s->vol = 5;
+    sdr_tune(s, 68500);               /* BPC */
     s->ref_db = -40;                  /* 雜訊底線（約 -90）落在下方 2/3 處 */
     s->range_db = 80;
     s->avg = 2;
@@ -53,23 +57,22 @@ void sdr_block(sdr *s, const uint16_t *x, int n, int skip)
 
 int sdr_cursor_bin(const sdr *s)
 {
-    int b0, b1, best;
-    spectrum_px_bins(s->cursor, &b0, &b1);
-    best = b0;
-    for (int b = b0 + 1; b < b1; b++)
-        if (s->sp.bin_db[b] > s->sp.bin_db[best])
-            best = b;
-    return best;
+    int b = (int)(((int64_t)s->tune_hz * SP_N + SP_FS / 2) / SP_FS);
+    return b > SP_BINS - 1 ? SP_BINS - 1 : b;
+}
+
+void sdr_tune(sdr *s, int32_t hz)
+{
+    if (hz < 0) hz = 0;
+    if (hz > SP_FS / 2 - 1) hz = SP_FS / 2 - 1;
+    s->tune_hz = hz;
+    s->cursor = (int)((int64_t)hz * UI_W / (SP_FS / 2));
+    s->ddc_dirty = 1;
 }
 
 /* ---- 按鍵 ---------------------------------------------------------------- */
 
-static void cursor_move(sdr *s, int d)
-{
-    s->cursor += d;
-    if (s->cursor < 0) s->cursor = 0;
-    if (s->cursor > UI_W - 1) s->cursor = UI_W - 1;
-}
+static const int STEPS[] = { 10, 100, 1000, 10000 };
 
 /* "68.5" -> 68500 Hz。只接受數字與一個小數點，最多三位小數。 */
 static int32_t parse_khz(const char *e)
@@ -121,11 +124,8 @@ static int entry_key(sdr *s, uint8_t c)
     }
     if (c == KEY_ENTER) {
         int32_t hz = parse_khz(s->entry);
-        if (hz >= 0 && hz < SP_FS / 2) {
-            /* 像素 p 涵蓋 [p, p+1) × 781.25 Hz */
-            s->cursor = (int)((int64_t)hz * UI_W / (SP_FS / 2));
-            cursor_move(s, 0);
-        }
+        if (hz >= 0 && hz < SP_FS / 2)
+            sdr_tune(s, hz);
         s->entering = 0;
         s->entry_len = 0;
         s->entry[0] = 0;
@@ -142,24 +142,48 @@ int sdr_key(sdr *s, const key_event *ev)
         return 1;
 
     /* 大寫 H / L 是大步（Shift），其餘指令不分大小寫（CapsLock 開著也能用） */
-    if (c == 'H') { cursor_move(s, -10); return 1; }
-    if (c == 'L') { cursor_move(s, 10);  return 1; }
+    if (c == 'H') { sdr_tune(s, s->tune_hz - 10 * s->step_hz); return 1; }
+    if (c == 'L') { sdr_tune(s, s->tune_hz + 10 * s->step_hz); return 1; }
     if (c >= 'A' && c <= 'Z')
         c = (uint8_t)(c - 'A' + 'a');
 
     switch (c) {
-    case KEY_LEFT:  case 'h': cursor_move(s, -1); return 1;
-    case KEY_RIGHT: case 'l': cursor_move(s, 1);  return 1;
+    case KEY_LEFT:  case 'h': sdr_tune(s, s->tune_hz - s->step_hz); return 1;
+    case KEY_RIGHT: case 'l': sdr_tune(s, s->tune_hz + s->step_hz); return 1;
+    case 's': {
+        int i = 0;
+        while (STEPS[i] != s->step_hz && i < 3) i++;
+        s->step_hz = STEPS[(i + 1) % 4];
+        /* 換步進時把調諧點對齊到新步進，之後的數字才整齊 */
+        if (s->step_hz > 10)
+            sdr_tune(s, (s->tune_hz + s->step_hz / 2) / s->step_hz * s->step_hz);
+        return 1;
+    }
+    case 'm':
+        s->mode = (s->mode + 1) % DDC_NMODES;
+        s->bw_hz = ddc_default_bw(s->mode);
+        s->ddc_dirty = 1;
+        return 1;
+    case 'b':
+        s->bw_hz = ddc_next_bw(s->mode, s->bw_hz);
+        s->ddc_dirty = 1;
+        return 1;
+    case KEY_PGUP: case '=':
+        if (s->vol < SDR_VOL_MAX) s->vol++;
+        return 1;
+    case KEY_PGDN: case '-':
+        if (s->vol > 0) s->vol--;
+        return 1;
     case KEY_UP:    case 'k':
         if (s->ref_db < 0) s->ref_db += 5;
         return 1;
     case KEY_DOWN:  case 'j':
         if (s->ref_db > -140) s->ref_db -= 5;
         return 1;
-    case KEY_PGUP:  case ']':
+    case ']':
         if (s->range_db < 120) s->range_db += 20;
         return 1;
-    case KEY_PGDN:  case '[':
+    case '[':
         if (s->range_db > 40) s->range_db -= 20;
         return 1;
     case 'a':
@@ -184,13 +208,6 @@ static void fmt_db10(char *b, int v)
     int neg = v < 0;
     if (neg) v = -v;
     sprintf(b, "%s%d.%d", neg ? "-" : "", v / 10, v % 10);
-}
-
-/* Hz -> "68.48"（kHz，兩位小數，四捨五入） */
-static void fmt_khz(char *b, int32_t hz)
-{
-    int32_t c = (hz + 5) / 10;        /* 0.01 kHz 為單位 */
-    sprintf(b, "%ld.%02ld", (long)(c / 100), (long)(c % 100));
 }
 
 static void text(sdr *s, int x, int y, uint16_t color, const char *str)
@@ -239,11 +256,15 @@ void sdr_prepare(sdr *s)
 
     s->ntext = 0;
 
-    /* 狀態列 */
-    text(s, 4, 4, C_WHITE, "RETRO-SDR");
-    sprintf(b, "0-250kHz  REF %d  RNG %d  AVG %s",
-            s->ref_db, s->range_db, AVG[s->avg].name);
-    text(s, 70, 4, C_GRAY, b);
+    /* 狀態列：收什麼、怎麼收 */
+    {
+        int32_t hz = s->tune_hz;
+        sprintf(b, "%3s %3ld.%03ld kHz", ddc_mode_name(s->mode),
+                (long)(hz / 1000), (long)(hz % 1000));
+        text(s, 4, 4, C_CYAN, b);
+        sprintf(b, "BW %d  STEP %d  VOL %d", s->bw_hz, s->step_hz, s->vol);
+        text(s, 112, 4, C_GRAY, b);
+    }
     if (s->quiet)
         text(s, UI_W - 6 * 5 - 4, 4, C_RED, "QUIET");
     else if (s->peak_on)
@@ -263,10 +284,13 @@ void sdr_prepare(sdr *s)
 
     /* 資訊列 1：游標與雜訊底線 */
     {
-        int cb = sdr_cursor_bin(s);
-        fmt_khz(d1, spectrum_bin_hz(cb));
-        fmt_db10(d2, s->sp.bin_db[cb]);
-        sprintf(b, "CUR %s kHz  %s dBFS", d1, d2);
+        /* 調諧點 ±1 bin 的最大值：載波不一定剛好落在 bin 中央 */
+        int cb = sdr_cursor_bin(s), lv = s->sp.bin_db[cb];
+        if (cb > 0 && s->sp.bin_db[cb - 1] > lv) lv = s->sp.bin_db[cb - 1];
+        if (cb < SP_BINS - 1 && s->sp.bin_db[cb + 1] > lv) lv = s->sp.bin_db[cb + 1];
+        fmt_db10(d1, lv);
+        fmt_db10(d2, lv - s->sp.nf);
+        sprintf(b, "SIG %s dBFS  S/N %s dB", d1, d2);
         text(s, 4, UI_Y_INFO + 4, C_CYAN, b);
         fmt_db10(d1, s->sp.nf);
         sprintf(b, "NF %s", d1);
@@ -279,15 +303,15 @@ void sdr_prepare(sdr *s)
         text(s, 4, UI_Y_INFO + 18, C_AMBER, b);
     } else {
         /* Hann 窗的等效雜訊頻寬是 1.5 個 bin：122 × 1.5 ≈ 183 Hz */
-        sprintf(b, "RBW 183Hz %dx4096  PROC %lums  SCAN %luus  DROP %lu",
-                s->sp.k_used, (unsigned long)s->proc_ms,
-                (unsigned long)s->scan_us, (unsigned long)s->drops);
+        sprintf(b, "REF %d RNG %d AVG %s  PROC %lums DROP %lu",
+                s->ref_db, s->range_db, AVG[s->avg].name,
+                (unsigned long)s->proc_ms, (unsigned long)s->drops);
         text(s, 4, UI_Y_INFO + 18, C_GRAY, b);
     }
 
     /* 按鍵提示 */
     text(s, 4, UI_Y_HINT + 1, C_DIM,
-         "PAD <>CURSOR ^vREF  A/B RANGE  SEL AVG  START PEAK");
+         "PAD <>TUNE ^vREF  A/B VOL  SEL MODE  START STEP");
     text(s, 4, UI_Y_HINT + 9, C_DIM,
-         "KBD 0-9 . ENTER=FREQ  H/L J/K  [ ] A P  Q=QUIET");
+         "KBD 0-9.ENTER FREQ  M B S  -/= VOL  [ ] A P Q");
 }

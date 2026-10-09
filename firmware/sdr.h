@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 
+#include "ddc.h"
 #include "keys.h"
 #include "spectrum.h"
 #include "wfall.h"
@@ -39,6 +40,8 @@ typedef struct {
     char     s[UI_TEXT_COLS + 1];
 } ui_text;
 
+#define SDR_VOL_MAX 10
+
 /* 平均的檔位：每塊做幾段 FFT、指數平均的強度 */
 #define SDR_AVG_LEVELS 5
 
@@ -46,7 +49,13 @@ typedef struct {
     spectrum sp;
     wfall    wf;
 
-    int cursor;                       /* 游標像素 0..319 */
+    int32_t tune_hz;                  /* 調諧點（解調與游標都看它） */
+    int cursor;                       /* 游標像素 0..319，由 tune_hz 算出 */
+    int step_hz;                      /* ←→ 一次調多少 */
+    int mode;                         /* DDC_AM / CW / USB / LSB */
+    int bw_hz;
+    int vol;                          /* 0..SDR_VOL_MAX，0 = 靜音 */
+    int ddc_dirty;                    /* 調諧、模式、頻寬改了：平台要轉給 Core 1 */
     int ref_db;                       /* 頻譜頂端，dBFS（整數 dB） */
     int range_db;                     /* 頻譜高度代表幾 dB */
     int avg;                          /* 0..SDR_AVG_LEVELS-1 */
@@ -88,7 +97,10 @@ void sdr_prepare(sdr *s);
 /* 第 y 列，320 個 RGB565，**big-endian**（ILI9341 的線序，DMA 直接送）。 */
 void ui_line(const sdr *s, int y, uint16_t *out);
 
-/* 游標處的峰值 bin（頻率解析度 122 Hz，比一個像素的 781 Hz 細）。 */
+/* 調諧點所在的 bin。 */
 int sdr_cursor_bin(const sdr *s);
+
+/* 設調諧點（會夾在 0..fs/2 內，並更新游標像素、標記 ddc_dirty）。 */
+void sdr_tune(sdr *s, int32_t hz);
 
 #endif /* SDR_H */
