@@ -1,0 +1,22 @@
+# build 產物
+build/
+build_offset/
+*.uf2
+*.elf
+*.bin
+*.hex
+
+# loader_offset 生成物（依 arduino-pico 版本重跑產生）
+loader_offset/memmap_app_arduino.ld
+
+# PC 測試產物
+firmware/*.exe
+firmware/*.o
+firmware/*.ppm
+
+# 作業系統
+.DS_Store
+Thumbs.db
+desktop.ini
+__pycache__/
+*.pyc
