@@ -17,6 +17,7 @@
 #define SP_BINS     (SP_N / 2)          /* 0 .. fs/2 */
 #define SP_W        320                 /* 螢幕寬 */
 #define SP_FS       500000              /* ADC 取樣率 */
+#define SP_NF_LO    4                   /* bin 0–3 是 DC 與窗的殘渣，NF 與 S 表都不看 */
 
 typedef struct {
     int16_t bin_db[SP_BINS];            /* 這一塊的平均，dBFS×10 */

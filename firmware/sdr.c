@@ -1,6 +1,7 @@
 #include "sdr.h"
 #include "eq.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,6 +13,7 @@
 #define C_DIM    RGB565(90, 90, 100)
 #define C_CYAN   RGB565(80, 230, 255)
 #define C_AMBER  RGB565(255, 190, 60)
+#define C_GREEN  RGB565(110, 230, 110)
 #define C_RED    RGB565(255, 80, 60)
 
 /* 每塊的樣本數扣掉 skip 之後，最多切得出 7 段 4096（見 RetroSDR.ino 的
@@ -94,7 +96,88 @@ void sdr_block(sdr *s, const uint16_t *x, int n, int skip)
         return;
     wfall_push(&s->wf, s->sp.raw, (s->ref_db - s->range_db) * 10,
                s->range_db * 10);
+    sdr_band_meter(s);
     s->blocks++;
+}
+
+/* ---- S 表 ---------------------------------------------------------------- */
+
+/* 10^(d/100)，d 是 dB×10。查表：小數部分（0.0–9.9 dB）一張、十進位一張，
+ * 不呼叫 powf（M0+ 軟體浮點，通帶 66 個 bin 會花掉 Core 0 不少時間）。 */
+static float lin10(int d)
+{
+    static float frac[100];
+    static int ready;
+    if (!ready) {
+        for (int i = 0; i < 100; i++)
+            frac[i] = powf(10.0f, i / 100.0f);
+        ready = 1;
+    }
+    int n = d >= 0 ? d / 100 : -((-d + 99) / 100);
+    float v = frac[d - n * 100];
+    for (; n > 0; n--) v *= 10.0f;
+    for (; n < 0; n++) v *= 0.1f;
+    return v;
+}
+
+static int hz_bin(int32_t hz)
+{
+    int b = (int)(((int64_t)hz * SP_N + SP_FS / 2) / SP_FS);
+    return b < 0 ? 0 : b > SP_BINS - 1 ? SP_BINS - 1 : b;
+}
+
+void sdr_band_meter(sdr *s)
+{
+    /* 解調通帶（跟 ddc_set 一致）：AM／CW 以調諧點為中心，USB／LSB 從 ±150 Hz 起 */
+    int32_t lo, hi;
+    switch (s->mode) {
+    case DDC_USB: lo = s->tune_hz + 150; hi = lo + s->bw_hz; break;
+    case DDC_LSB: hi = s->tune_hz - 150; lo = hi - s->bw_hz; break;
+    default:      lo = s->tune_hz - s->bw_hz / 2; hi = s->tune_hz + s->bw_hz / 2; break;
+    }
+    int p0 = hz_bin(lo), p1 = hz_bin(hi);
+    if (p0 < SP_NF_LO) p0 = SP_NF_LO;
+    if (p1 < p0) p1 = p0;
+    int np = p1 - p0 + 1;
+
+    /* 兩側各隔一格，各取 max(通帶寬, 16 格 ≈ 2 kHz)；中位數不怕旁邊有一兩個台 */
+    int w = np > 16 ? np : 16;
+    int16_t adj[256];                     /* 兩側各最多 128 格（通帶 16 kHz）；放不下的就不取 */
+    int na = 0;
+    for (int b = p0 - 2 - w + 1; b <= p0 - 2; b++)
+        if (b >= SP_NF_LO && na < (int)(sizeof adj / sizeof adj[0])) adj[na++] = s->sp.bin_db[b];
+    for (int b = p1 + 2; b < p1 + 2 + w; b++)
+        if (b < SP_BINS && na < (int)(sizeof adj / sizeof adj[0])) adj[na++] = s->sp.bin_db[b];
+    if (na < 4) {
+        s->band_sn = 0;
+        return;
+    }
+    for (int i = 1; i < na; i++) {        /* 插入排序，最多幾百個 */
+        int16_t v = adj[i];
+        int j = i - 1;
+        while (j >= 0 && adj[j] > v) { adj[j + 1] = adj[j]; j--; }
+        adj[j + 1] = v;
+    }
+    int med = adj[na / 2];
+
+    /* 通帶內功率相對中位數加總（線性），再除以 np = 相對同頻寬的雜訊 */
+    float sum = 0;
+    for (int b = p0; b <= p1; b++)
+        sum += lin10(s->sp.bin_db[b] - med);
+    float r = sum / (float)np;
+    /* 單塊的起伏：CW 500（約 5 格）標準差 1.7 dB、AM 8k 0.5 dB（PC 量的，平均無偏）。
+     * 平均 1/4 讓長條不跳，換了通帶就從這一塊重來 */
+    if (p0 != s->band_p0 || p1 != s->band_p1 || s->band_avg <= 0) {
+        s->band_p0 = p0;
+        s->band_p1 = p1;
+        s->band_avg = r;
+    } else {
+        s->band_avg += (r - s->band_avg) * 0.25f;
+    }
+    r = s->band_avg;
+    int sn = (int)lroundf(100.0f * log10f(r > 1e-6f ? r : 1e-6f));
+    s->band_sn = (int16_t)sn;
+    s->band_db = (int16_t)(med + (int)lroundf(100.0f * log10f(sum > 1e-6f ? sum : 1e-6f)));
 }
 
 int sdr_cursor_bin(const sdr *s)
@@ -361,8 +444,14 @@ void sdr_prepare(sdr *s)
         if (cb < SP_BINS - 1 && s->sp.bin_db[cb + 1] > lv) lv = s->sp.bin_db[cb + 1];
         fmt_db10(d1, lv);
         fmt_db10(d2, lv - s->sp.nf);
-        sprintf(b, "SIG %s dBFS  S/N %s dB", d1, d2);
+        sprintf(b, "SIG %s  S/N %s", d1, d2);
         text(s, 4, UI_Y_INFO + 4, C_CYAN, b);
+        /* S 表：通帶內 S/N（數字＋下面的長條） */
+        fmt_db10(d1, s->band_sn);
+        sprintf(b, "BAND %s dB", d1);
+        text(s, 4 + 23 * 6, UI_Y_INFO + 4, C_GREEN, b);
+        int px = s->band_sn * (UI_W - 8) / (SDR_METER_DB * 10);
+        s->meter_px = (int16_t)(px < 0 ? 0 : px > UI_W - 8 ? UI_W - 8 : px);
         fmt_db10(d1, s->sp.nf);
         sprintf(b, "NF %s", d1);
         text(s, UI_W - (int)strlen(b) * 6 - 4, UI_Y_INFO + 4, C_AMBER, b);

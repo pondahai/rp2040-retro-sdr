@@ -19,6 +19,10 @@
 #define C_TRACE  RGB565(80, 230, 255)
 #define C_PEAK   RGB565(200, 180, 60)
 #define C_CURSOR RGB565(255, 80, 40)
+#define C_MTRACK RGB565(36, 36, 48)
+#define C_MTICK  RGB565(110, 110, 130)
+#define C_MLOW   RGB565(255, 190, 60)
+#define C_MHIGH  RGB565(110, 230, 110)
 
 static void fill(uint16_t *out, uint16_t c)
 {
@@ -63,6 +67,20 @@ static void wf_line(const sdr *s, int r, uint16_t *out)
         out[s->cursor] = C_CURSOR;
 }
 
+/* S 表長條：未滿的部分是暗軌，每 10 dB 一格刻度；10 dB 以下琥珀色、以上綠色 */
+static void meter_line(const sdr *s, uint16_t *out)
+{
+    const int x0 = 4, w = UI_W - 8, low = w * 10 / SDR_METER_DB;
+    for (int i = 0; i < w; i++) {
+        uint16_t c = C_MTRACK;
+        if (i < s->meter_px)
+            c = s->meter_px < low ? C_MLOW : C_MHIGH;
+        else if (i % (w / (SDR_METER_DB / 10)) == 0)
+            c = C_MTICK;
+        out[x0 + i] = c;
+    }
+}
+
 static void text_line(const sdr *s, int y, uint16_t *out)
 {
     for (int i = 0; i < s->ntext; i++) {
@@ -90,8 +108,11 @@ void ui_line(const sdr *s, int y, uint16_t *out)
         spec_line(s, y - UI_Y_SPEC, out);
     else if (y < UI_Y_WF + WF_H)
         wf_line(s, y - UI_Y_WF, out);
-    else if (y < UI_Y_HINT)
+    else if (y < UI_Y_HINT) {
         fill(out, C_INFO);
+        if (y >= UI_Y_METER && y < UI_Y_METER + UI_H_METER)
+            meter_line(s, out);
+    }
     else
         fill(out, C_BAR);
 

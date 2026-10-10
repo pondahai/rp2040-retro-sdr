@@ -34,6 +34,10 @@
 
 #define UI_TEXT_COLS (UI_W / 6)
 #define UI_MAX_TEXT  32
+/* S 表長條：資訊列兩行字中間，滿格 SDR_METER_DB dB */
+#define UI_Y_METER  (UI_Y_INFO + 12)
+#define UI_H_METER  3
+#define SDR_METER_DB 60
 #define UI_STAT_LINES 11             /* 統計頁的行數：瀑布圖區 96 px / 8 px，留上下邊 */
 
 typedef struct {
@@ -91,10 +95,18 @@ typedef struct {
     uint32_t drops;                   /* 處理不及、整塊沒接上的次數 */
     uint32_t blocks;
 
+    /* S 表（sdr_block 每塊算，DESIGN.md §3.1）：解調通帶內的總功率，對通帶兩側
+     * 附近雜訊的中位數換算成同樣頻寬的功率。是 (S+N)/N：沒訊號時約 0 dB。 */
+    int16_t  band_sn;                 /* dB×10 */
+    int16_t  band_db;                 /* 通帶內總功率，dBFS×10 */
+    float    band_avg;                /* 平均中的 S/N（線性比），約 4 塊 ≈ 0.27 s */
+    int      band_p0, band_p1;        /* 上次的通帶 bin：換台／模式／頻寬就重新平均 */
+
     /* sdr_prepare() 算好、ui_line() 直接查的東西 */
     uint8_t  trace_row[UI_W];         /* 0..UI_H_SPEC-1，頻譜曲線落在第幾列 */
     uint8_t  peak_row[UI_W];
     uint8_t  grid[UI_H_SPEC];         /* 該列是不是 10 dB 格線（1/0） */
+    int16_t  meter_px;                /* S 表長條的長度（像素） */
     ui_text  text[UI_MAX_TEXT];
     int      ntext;
 } sdr;
@@ -106,6 +118,10 @@ int sdr_k(const sdr *s);
 
 /* 一塊樣本進來：頻譜、雜訊底線、瀑布圖往下推一列。 */
 void sdr_block(sdr *s, const uint16_t *x, int n, int skip);
+
+/* 從目前的頻譜算 S 表（band_sn、band_db）。sdr_block 會呼叫；改調諧／模式／頻寬後
+ * 也可以直接呼叫，不必等下一塊。 */
+void sdr_band_meter(sdr *s);
 
 /* 處理一個按鍵。回傳 1 = 畫面要重畫。 */
 int sdr_key(sdr *s, const key_event *ev);

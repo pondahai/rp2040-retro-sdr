@@ -138,7 +138,7 @@ int spectrum_block(spectrum *sp, const uint16_t *x, int n, int skip, int k)
     sp->primed = 1;
 
     /* bin 0..3 是 DC 與窗函數的殘渣，不算進雜訊底線 */
-    sp->nf = median_db10(sp->bin_db + 4, SP_BINS - 4);
+    sp->nf = median_db10(sp->bin_db + SP_NF_LO, SP_BINS - SP_NF_LO);
     sp->k_used = k;
     sp->t_post = now_us() - t4;
     return k;

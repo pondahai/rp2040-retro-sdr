@@ -134,6 +134,19 @@ static void type(sdr *s, const char *str)
 
 static sdr g_s;                       /* 140 KB 左右，別放在堆疊上 */
 
+static double meter_run(sdr *s, int mode, int bw, const tone *t, int nt)
+{
+    sdr_init(s);
+    s->mode = mode;
+    s->bw_hz = bw;
+    sdr_tune(s, 68500);
+    for (int blk = 0; blk < 12; blk++) {     /* S 表平均 1/4，十幾塊才穩 */
+        synth(508.0, 2.0, t, nt);
+        sdr_block(s, g_block, SDR_BLOCK, SDR_SKIP);
+    }
+    return s->band_sn / 10.0;
+}
+
 static double eq_gain(int preset, double f, double amp, int16_t *buf, double fs)
 {
     const int n = 15625;
@@ -725,6 +738,33 @@ int main(void)
         CHECK(g > -1.0 && g < 3.5, "SPK+ full scale at 2.5 kHz clips, no wraparound (%.1f dB)", g);
         g = EQ_GAIN(1, 7000, 32000);
         CHECK(g > -3.0 && g < 3.0, "SPK full scale near Nyquist stays sane (%.1f dB)", g);
+    }
+
+    printf("[13] S meter: in-passband S/N\n");
+    {
+        sdr *s = &g_s;
+        /* 跑幾塊讓平均穩下來，回傳 band_sn（dB） */
+        #define METER(mode_, bw_, tones_, nt_) meter_run(s, mode_, bw_, tones_, nt_)
+        tone none[1] = { { 0, 0 } };
+        double n_am = METER(DDC_AM, 8000, none, 0);
+        double n_cw = METER(DDC_CW, 500, none, 0);
+        CHECK(fabs(n_am) < 3 && fabs(n_cw) < 3,
+              "noise only reads about 0 dB (AM 8k %.1f, CW 500 %.1f)", n_am, n_cw);
+        tone t1[1] = { { 68500, 3.0 } };
+        double cw = METER(DDC_CW, 500, t1, 1);
+        double am = METER(DDC_AM, 8000, t1, 1);
+        CHECK(cw > 15, "CW 500: 3 LSB carrier in 2 LSB noise -> %.1f dB", cw);
+        CHECK(cw - am > 7 && cw - am < 16,
+              "same carrier, AM 8k reads %.1f dB lower (16x the noise bandwidth)", cw - am);
+        tone up[1] = { { 69500, 3.0 } }, dn[1] = { { 67500, 3.0 } };
+        double u = METER(DDC_USB, 2700, up, 1), l = METER(DDC_USB, 2700, dn, 1);
+        CHECK(u > 10 && fabs(l) < 3, "USB: tone above tune %.1f dB, below tune %.1f dB", u, l);
+        sdr_prepare(s);
+        int seen = 0;
+        for (int i = 0; i < s->ntext; i++)
+            seen |= strstr(s->text[i].s, "BAND ") != NULL;
+        CHECK(seen && s->meter_px >= 0 && s->meter_px <= UI_W - 8,
+              "BAND on the info line, bar %d px", s->meter_px);
     }
 
     write_glyphs("glyphs.ppm");
