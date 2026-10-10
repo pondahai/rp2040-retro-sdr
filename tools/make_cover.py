@@ -20,9 +20,6 @@ BODY_L = (220, 211, 192)
 BODY_D = (160, 149, 127)
 BODY_DD = (133, 122, 102)
 GRILLE = (92, 80, 70)
-DIAL = (239, 224, 168)
-DIAL_L = (248, 238, 196)
-DIAL_D = (214, 196, 132)
 RED = (208, 64, 42)
 RED_L = (240, 110, 80)
 METAL = (92, 86, 80)
@@ -31,6 +28,12 @@ METAL_D = (60, 55, 51)
 CHROME = (222, 222, 226)
 CHROME_D = (150, 150, 158)
 METER = (244, 238, 220)
+WF_BG = (22, 30, 70)                 # 瀑布圖：深藍底 -> 藍 -> 青 -> 黃（跟機上的調色盤同一個方向）
+WF_NOISE = (40, 60, 140)
+WF_BLU = (60, 110, 220)
+WF_CYN = (80, 210, 230)
+WF_YEL = (250, 220, 90)
+WF_HI = (70, 84, 130)
 
 
 def build():
@@ -76,18 +79,25 @@ def build():
         d.line([(gx0 + 2, y + 1), (gx1 - 2, y + 1)], fill=BODY_L)
     d.line([(gx0 + 1, gy0 + 1), (gx1 - 1, gy0 + 1)], fill=BODY_DD)   # 內緣陰影（受光在左上）
 
-    # 刻度窗：亮的米黃背光，刻度＋紅指針
+    # 刻度窗改成一塊小螢幕：瀑布圖（SDR 最好認的標誌），2×2 色塊，紅線是調諧游標
     x0, y0, x1, y1 = 38, 40, 78, 58
-    d.rectangle([x0, y0, x1, y1], fill=DIAL, outline=OUTL)
-    d.rectangle([x0 + 1, y0 + 1, x1 - 1, y0 + 4], fill=DIAL_L)
-    d.rectangle([x0 + 1, y1 - 3, x1 - 1, y1 - 1], fill=DIAL_D)
-    for i, x in enumerate(range(x0 + 3, x1 - 1, 3)):
-        h = 4 if i % 3 == 0 else 2
-        d.line([(x, y0 + 7), (x, y0 + 7 + h)], fill=OUTL)
-    for x in range(x0 + 4, x1 - 2, 6):            # 第二排刻度（另一個波段）
-        d.line([(x, y0 + 13), (x + 2, y0 + 13)], fill=BODY_DD)
-    d.line([(61, y0 + 2), (61, y1 - 2)], fill=RED, width=1)
-    d.line([(62, y0 + 2), (62, y1 - 2)], fill=RED_L, width=1)
+    d.rectangle([x0, y0, x1, y1], fill=WF_BG, outline=OUTL)
+    wr = random.Random(68500)
+    # 幾條「訊號」：固定在某些欄，強度不同；其餘是深藍底雜訊
+    sigs = {6: WF_YEL, 7: WF_CYN, 13: WF_CYN, 15: WF_BLU, 4: WF_BLU, 17: WF_CYN}
+    for gy in range(y0 + 1, y1, 2):
+        for gi, gx in enumerate(range(x0 + 1, x1, 2)):
+            c = sigs.get(gi)
+            if c is WF_YEL and wr.random() < 0.25:
+                c = WF_CYN                         # 強訊號偶爾弱一點（衰落）
+            elif c is None:
+                c = WF_NOISE if wr.random() < 0.18 else None
+            elif c is not WF_YEL and wr.random() < 0.3:
+                c = WF_NOISE                       # 弱訊號斷斷續續
+            if c:
+                d.rectangle([gx, gy, gx + 1, gy + 1], fill=c)
+    d.line([(x0 + 1, y0 + 1), (x1 - 1, y0 + 1)], fill=WF_HI)   # 玻璃上緣的反光
+    d.line([(61, y0 + 2), (61, y1 - 1)], fill=RED)
 
     # S 表：小方窗、弧形刻度、指針
     mx0, my0, mx1, my1 = 38, 62, 55, 77
@@ -126,7 +136,7 @@ def build():
     rnd = random.Random(1987)
     px = im.load()
     body_cols = {BODY, BODY_L, BODY_D, BODY_DD}
-    soft = {DIAL, DIAL_L, DIAL_D, METER, GRILLE, METAL, METAL_L}
+    soft = {METER, GRILLE, METAL, METAL_L}
     for y in range(H):
         for x in range(W):
             c = px[x, y]

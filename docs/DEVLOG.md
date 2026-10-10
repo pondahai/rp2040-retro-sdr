@@ -703,3 +703,8 @@ DESIGN §11 第 10 項。原本的 S/N 是單一 bin 對全頻段中位數，跟
 其餘補 0xFF；整個 16 KB 也跟 bundle 的 `RetroDict_standalone.uf2` 相同。
 
 **bundle**：封面放進 `covers/RETROSDR.INO.RAW`，兩個 uf2 掛在 Release `v2026.10.10`。
+
+**封面改版（同日）**：使用者要在封面放一張瀑布圖代表 SDR，用簡單色塊即可。刻度窗改成小螢幕：
+深藍底、2×2 色塊的訊號直條（藍／青／黃，跟機上調色盤同方向）、紅線保留當調諧游標。
+色塊刻意平塗，RGB565 後 89 色（略低於 ICON-STYLE 建議的三位數，可接受）。bundle 的封面同步更新；
+uf2 不受影響（封面是獨立檔案），Release 不必重傳。

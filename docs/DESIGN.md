@@ -464,8 +464,8 @@ M2 的測試訊號可以由掌機自己產生：在閒置的 GPIO 0 輸出 68.5 
 M4 的判準已達成：錄下的 .wav 是 500 ksps 原始樣本，`tools/rec_analyze.py` 可以分析，
 並輸出 SDR++／SDR# 能直接開的 I/Q wav。
 
-M5 的判準已達成：封面是 1980 年代米色短波收音機（`tools/make_cover.py` 產生 `assets/RetroSDR.ino.RAW`，
-RGB565 後 102 色），`build_offset.bat` 連結在 `0x10004000` 並把封面複製成兩個 uf2 各自的 `.RAW`。
+M5 的判準已達成：封面是 1980 年代米色短波收音機，刻度窗是一塊色塊瀑布圖（SDR 的標誌）
+（`tools/make_cover.py` 產生 `assets/RetroSDR.ino.RAW`，RGB565 後 89 色），`build_offset.bat` 連結在 `0x10004000` 並把封面複製成兩個 uf2 各自的 `.RAW`。
 載入器選單看得到封面、啟動正常。standalone 版夾的跳板與 bundle 的 `trampoline.uf2` 逐位元組相同。
 
 ---
