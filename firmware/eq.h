@@ -6,7 +6,7 @@
  *
  *   FLAT   不處理
  *   SPK    高通 300 Hz ＋ 2 kHz +6 dB
- *   SPK+   高通 400 Hz ＋ 2.5 kHz +9 dB
+ *   SPK+   高通 400 Hz ＋ 2.5 kHz +9 dB（開機預設，上機實測最清楚）
  *   VOICE  高通 300 Hz ＋ 2 kHz +6 dB ＋ 低通 3.2 kHz（削掉嘶嘶聲）
  *
  * 係數 Q13（|係數| < 4），狀態是 int16 範圍，乘積加總不超過 int32。

@@ -34,6 +34,7 @@ void sdr_init(sdr *s)
     s->mode = DDC_CW;
     s->bw_hz = ddc_default_bw(DDC_CW);
     s->vol = 5;
+    s->eq = 2;                        /* SPK+：上機實測機上喇叭最清楚（eq.h） */
     sdr_tune(s, 68500);               /* BPC */
     s->ref_db = -40;                  /* 雜訊底線（約 -90）落在下方 2/3 處 */
     s->range_db = 80;
