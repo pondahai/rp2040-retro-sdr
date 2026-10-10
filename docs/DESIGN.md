@@ -456,6 +456,9 @@ PC 測試 [14]–[16]（格式、雜訊包絡、68.5 kHz 經 DDC 端到端）都
 
 ## 9. 未來：Tayloe 子板
 
+> 已具體化成 `docs/PLAN-IQ.md`：腳位改成 I = GPIO 26、Q = GPIO 27（165 QH 與 595 SER 共用 GPIO 15），
+> 本振由 Si5351（I2C0，GPIO 0／1）產生，不用 PIO。下面是原本的構想。
+
 這份設計刻意讓 DSP 和 UI 與前端無關。之後若加 Pi Pico Rx 那種 Tayloe QSD 子板：
 
 - I／Q 進 ADC，PIO 在 GPIO 0／1 產生正交本振

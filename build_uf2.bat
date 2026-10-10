@@ -19,5 +19,5 @@ if "%CLI%"=="" set CLI=arduino-cli
 set HERE=%~dp0
 "%CLI%" compile --fqbn rp2040:rp2040:rpipico ^
   --build-property "compiler.c.extra_flags=-I%HERE%firmware" ^
-  --build-property "compiler.cpp.extra_flags=-I%HERE%firmware" ^
+  --build-property "compiler.cpp.extra_flags=-I%HERE%firmware %SDR_DEFS%" ^
   --output-dir "%HERE%build" "%HERE%RetroSDR"

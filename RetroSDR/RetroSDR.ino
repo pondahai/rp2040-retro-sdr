@@ -61,10 +61,22 @@ extern "C" {
 // CLOCK 同時是天線輸入（ADC0）。LATCH 是 595 的 RCLK 與 165 的 SH/LD 共用
 // —— 從 PicoApple2 的 scan_matrix() 時序看得出來：拉高鎖存 595，拉低 1 µs
 // 讓 165 載入，再拉高。閒置時停在高，取樣期間不動它，鍵盤 LED 就不會閃。
+//
+// KBD_SHARED_DATA = 1（docs/PLAN-IQ.md §2.1）：165 的 QH 改經 1 kΩ 接到 GPIO 15，
+// 與 595 的 SER 共用；GPIO 27 的走線割斷，空出來當 ADC1（Q 通道）。寫 595 時
+// GPIO 15 是輸出（蓋過 1 kΩ 後面的 QH），讀 165 時切成輸入。沒改硬體就維持 0。
+#ifndef KBD_SHARED_DATA
+#define KBD_SHARED_DATA  0
+#endif
 #define DATA_OUT_PIN     15
 #define LATCH_PIN        14
 #define CLOCK_PIN        26
+#if KBD_SHARED_DATA
+#define DATA_IN_PIN      15
+#define PIN_ADC_Q        27                // 空出來的 ADC1，暫時只設成高阻抗
+#else
 #define DATA_IN_PIN      27
+#endif
 
 // ---- 喇叭 ----
 // 與 retro-dict / InfoNES 同一支腳。PWM 載波 500 kHz，跟 ADC 取樣率相同，
@@ -218,6 +230,9 @@ static inline void clockPulse()
 
 static void shiftOutSlow(uint8_t v)          // MSB first
 {
+#if KBD_SHARED_DATA
+    gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);    // 接手共用腳，QH 隔著 1 kΩ 打不過
+#endif
     for (int i = 7; i >= 0; i--) {
         gpio_put(DATA_OUT_PIN, (v >> i) & 1);
         busy_wait_us_32(1);
@@ -228,6 +243,10 @@ static void shiftOutSlow(uint8_t v)          // MSB first
 static uint8_t shiftInSlow()                 // 先讀再打時脈，與原版相同
 {
     uint8_t data = 0;
+#if KBD_SHARED_DATA
+    gpio_set_dir(DATA_IN_PIN, GPIO_IN);      // 放開共用腳，讓 QH 推過來
+    busy_wait_us_32(1);                      // 1 kΩ × 幾 pF 約 10 ns，等 1 µs 很寬裕
+#endif
     for (int i = 0; i < 8; i++) {
         if (gpio_get(DATA_IN_PIN))
             data |= (uint8_t)(1 << i);
@@ -252,7 +271,10 @@ static void scanMatrix(uint8_t rows[8])
             if (colData & (1 << (7 - col)))
                 bits |= (uint8_t)(1 << col);
         rows[row] = bits;
+        // KBD_SHARED_DATA：剛才 8 個 CLOCK 也把 QH 推進了 595 的移位暫存器。
+        // 不要緊 —— 595 只在 LATCH 上升時更新輸出，下一列上升前會先寫滿新資料。
     }
+    // KBD_SHARED_DATA：共用腳停在輸入，取樣期間 QH 與 GPIO 不對推。
     clockPulse();
     gpio_put(CLOCK_PIN, 0);                  // 交給 ADC 前一定是低
 }
@@ -713,7 +735,8 @@ static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
     else
         snprintf(L[9], W, "LOG    %s  %lu lines this session", tcLogFile(),
                  (unsigned long)g_jlog_lines);
-    snprintf(L[10], W, "I = back to waterfall");
+    snprintf(L[10], W, "I = back to waterfall          kbd %s",
+             KBD_SHARED_DATA ? "QH on GP15" : "QH on GP27");
 }
 
 // ============================================================================
@@ -1111,7 +1134,12 @@ void setup()
     gpio_put(CLOCK_PIN, 0);
     gpio_set_drive_strength(CLOCK_PIN, GPIO_DRIVE_STRENGTH_12MA);
     gpio_set_slew_rate(CLOCK_PIN, GPIO_SLEW_RATE_FAST);
+#if KBD_SHARED_DATA
+    gpio_disable_pulls(DATA_IN_PIN);              // 預設下拉約 50k，會跟串聯電阻分壓
+    adc_gpio_init(PIN_ADC_Q);                    // 高阻抗、關數位輸入；P4 才真的取樣
+#else
     gpio_init(DATA_IN_PIN);  gpio_set_dir(DATA_IN_PIN, GPIO_IN);
+#endif
     dpadInit();
 
     displayBegin();

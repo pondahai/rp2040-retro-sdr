@@ -150,6 +150,9 @@ build_uf2.bat                  :: 一般版，連結在 0x10000000，直接 USB 
 build_offset.bat               :: 偏移版，連結在 0x10004000，給 rp2040-retro-loader
 ```
 
+兩個都可以先設 `SDR_DEFS` 傳編譯選項，例如鍵盤 QH 共用版（`docs/PLAN-IQ.md`）：
+`set SDR_DEFS=-DKBD_SHARED_DATA=1`。
+
 偏移版的做法與 rp2040-retro-dict 相同，需要旁邊有 `rp2040-retro-loader` 才會產生
 可以直接 USB 燒錄的 `_standalone.uf2`。
 
