@@ -599,6 +599,8 @@ static const char *db10(char *b, int v)
 
 static bool     g_jlog_active, g_jlog_tried, g_jlog_ok;
 static uint32_t g_jlog_last_status, g_jlog_frames, g_jlog_lines;
+static int32_t  g_jlog_tune;
+static int      g_jlog_mode, g_jlog_bw;
 
 static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
 {
@@ -943,8 +945,17 @@ static void jjyLogPoll()
         g_jlog_active = false;
         return;
     }
+    // 記錄中換台（40 <-> 60 都在範圍內）或換模式、頻寬：解碼器已經重來，
+    // 寫一行新的 start，後面的 S／F 才分得出是哪個台。第一版沒做，實測
+    // 40 kHz 的 start 後面直接接了一行 tune=60000 的 S。
+    if (g_jlog_active && (g_sdr.tune_hz != g_jlog_tune || g_sdr.mode != g_jlog_mode ||
+                          g_sdr.bw_hz != g_jlog_bw))
+        g_jlog_active = false;
     if (!g_jlog_active) {
         g_jlog_active = true;
+        g_jlog_tune = g_sdr.tune_hz;
+        g_jlog_mode = g_sdr.mode;
+        g_jlog_bw = g_sdr.bw_hz;
         if (!g_jlog_tried) {
             g_jlog_tried = true;
             g_jlog_ok = sdBegin();
