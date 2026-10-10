@@ -594,6 +594,12 @@ static const char *db10(char *b, int v)
 // 那時候讀不到序列埠。這頁只在打開時才組字串，不打開不花時間。
 // ============================================================================
 
+// JJY 記錄檔的狀態（實作見下面的 jjyLogPoll()）
+#define JJY_LOG_FILE "JJYLOG.TXT"
+
+static bool     g_jlog_active, g_jlog_tried, g_jlog_ok;
+static uint32_t g_jlog_last_status, g_jlog_frames, g_jlog_lines;
+
 static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
 {
     if (!g_sdr.show_stats)
@@ -633,7 +639,13 @@ static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
              (int)(g_jjy.hi - g_jjy.lo), (unsigned long)g_jjy.symbols,
              (unsigned long)g_jjy.frames, g_jjy.last_err);
     snprintf(L[8], W, "TX     %s", g_sdr.tx_on ? "on, GPIO 0, 68493 Hz" : "off");
-    L[9][0] = 0;
+    if (!g_jlog_active)
+        snprintf(L[9], W, "LOG    tune to JJY (40/60 kHz) to log to " JJY_LOG_FILE);
+    else if (!g_jlog_ok)
+        snprintf(L[9], W, "LOG    " JJY_LOG_FILE ": no SD card / write failed");
+    else
+        snprintf(L[9], W, "LOG    " JJY_LOG_FILE "  %lu lines this session",
+                 (unsigned long)g_jlog_lines);
     snprintf(L[10], W, "I = back to waterfall");
 }
 
@@ -894,6 +906,80 @@ static void presetSave()
 }
 
 // 每圈一次：處理 sdr.c 送出來的 f／F 請求。
+// ============================================================================
+// JJY 記錄檔（SD 卡 JJYLOG.TXT）
+//
+// 實測都拔掉 USB（插著 S/N 會變差），看不到序列埠；解碼又要連續兩分鐘都成功
+// 才算鎖定，人不可能整晚盯著。所以調諧點在 JJY（40／60 kHz ±500 Hz，跟資訊列
+// 顯示解碼的條件相同）時自動記：每分鐘一行狀態、每解完一幀一行（格式見 jjy.h）。
+//
+// 每次都開檔、附加、關檔：掌機隨時可能被關掉，不留沒寫完的快取。一行幾 ms，
+// 一分鐘一兩次，偶爾掉一塊也無所謂。沒插卡只試一次，不會每分鐘卡 2 秒。
+// ============================================================================
+
+// JJY_LOG_FILE 與 g_jlog_* 宣告在統計頁前面（統計頁要顯示記錄狀態）
+
+static void jlogWrite(const char *line)
+{
+    FsFile f;
+    if (!f.open(JJY_LOG_FILE, O_WRONLY | O_CREAT | O_APPEND)) {
+        g_jlog_ok = false;
+        return;
+    }
+    f.write(line);
+    f.write("\n");
+    g_jlog_ok = f.close();
+    if (g_jlog_ok)
+        g_jlog_lines++;
+}
+
+static void jjyLogPoll()
+{
+    bool want = g_sdr.tc[0] != 0;          // updateTimecodeLine() 只在 JJY 上才填
+    uint32_t now = millis();
+    char line[200];
+
+    if (!want) {
+        g_jlog_active = false;
+        return;
+    }
+    if (!g_jlog_active) {
+        g_jlog_active = true;
+        if (!g_jlog_tried) {
+            g_jlog_tried = true;
+            g_jlog_ok = sdBegin();
+        }
+        if (!g_jlog_ok)
+            return;
+        uint32_t up = now / 1000;
+        snprintf(line, sizeof line, "# start up=%02lu:%02lu:%02lu tune=%ld mode=%s bw=%d",
+                 (unsigned long)(up / 3600), (unsigned long)(up / 60 % 60),
+                 (unsigned long)(up % 60), (long)g_sdr.tune_hz, ddc_mode_name(g_sdr.mode),
+                 g_sdr.bw_hz);
+        jlogWrite(line);
+        g_jlog_last_status = now;
+        g_jlog_frames = g_jjy.frames;
+    }
+    if (!g_jlog_ok)
+        return;
+
+    // 換台時 jjy_init() 會把 frames 歸零
+    if (g_jjy.frames < g_jlog_frames)
+        g_jlog_frames = g_jjy.frames;
+    if (g_jjy.frames != g_jlog_frames) {
+        g_jlog_frames = g_jjy.frames;
+        jjy_log_frame(&g_jjy, now / 1000, g_sdr.tune_hz, tuneLevel(), g_sdr.sp.nf,
+                      line, sizeof line);
+        jlogWrite(line);
+    }
+    if (now - g_jlog_last_status >= 60000) {
+        g_jlog_last_status = now;
+        jjy_log_status(&g_jjy, now / 1000, g_sdr.tune_hz, tuneLevel(), g_sdr.sp.nf,
+                       line, sizeof line);
+        jlogWrite(line);
+    }
+}
+
 static void presetPoll()
 {
     if (g_sdr.preset_save_req) {
@@ -996,6 +1082,7 @@ void loop()
     g_vol = g_sdr.vol;
     testToneSet(g_sdr.tx_on);
     updateTimecodeLine();
+    jjyLogPoll();
 
     // DSP（錄音時換成寫卡）
     recPoll();

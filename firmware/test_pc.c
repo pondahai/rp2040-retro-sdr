@@ -548,6 +548,27 @@ int main(void)
               "6 LSB carrier in 2 LSB noise: locked on 22:%02d (want 22:49)", j.t.min);
         CHECK(labs((long)j.t_ms - 120000L) < 60,
               "frame timestamp %lu ms (want 120000)", (unsigned long)j.t_ms);
+
+        /* 記錄檔的兩種行（jjy.h）。鎖定之後格式該有的欄位都要在 */
+        char line[200];
+        jjy_log_frame(&j, 3725, 40000, -632, -771, line, sizeof line);
+        printf("        %.90s...\n", line);
+        CHECK(!strncmp(line, "F up=01:02:05 tune=40000 sig=-63.2 nf=-77 err=0 good=", 52) &&
+              strstr(line, " jst=22:49 yday=") && strstr(line, " sym=M"),
+              "frame log line has uptime, level, decoded time and the 60 symbols");
+        CHECK(strlen(strstr(line, " sym=") + 5) == 60, "sym= carries exactly 60 symbols");
+        jjy_log_status(&j, 59, 40000, -5, -771, line, sizeof line);
+        printf("        %.90s...\n", line);
+        CHECK(!strncmp(line, "S up=00:00:59 tune=40000 sig=-0.5 nf=-77 sn=76.6 span=", 54) &&
+              strstr(line, " frames=") && strstr(line, " hist="),
+              "status log line (sig between 0 and -1 dB keeps its sign)");
+        jjy fresh;
+        jjy_init(&fresh);
+        fresh.last_err = JJY_E_PARITY;
+        jjy_log_frame(&fresh, 0, 60000, -900, -900, line, sizeof line);
+        CHECK(strstr(line, "err=-3 good=0 sym=") && !strstr(line, "jst=") &&
+              line[strlen(line) - 1] == '=',
+              "failed frame: no decoded-time fields ('%.60s')", line);
     }
 
     printf("[10] recording: R key and wav header\n");

@@ -1,6 +1,8 @@
 #include "jjy.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- 幀格式 --------------------------------------------------------------
@@ -276,6 +278,9 @@ static void frame_push(jjy *j, uint8_t s, uint32_t t_rise)
     if (j->pos == 60) {
         jjy_time t;
         int err = jjy_decode(j->frame, &t);
+        for (int i = 0; i < 60; i++)
+            j->last_frame[i] = sym_char(j->frame[i]);
+        j->last_frame[60] = 0;
         j->frames++;
         j->last_err = err;
         if (err == 0) {
@@ -292,4 +297,52 @@ static void frame_push(jjy *j, uint8_t s, uint32_t t_rise)
         j->pos = -1;
         j->last_sym = j->frame[59];
     }
+}
+
+/* ---- 記錄檔的一行（見 jjy.h） ----------------------------------------------- */
+
+/* dB×10 -> "-63.2"（不用 %f：M0+ 上的浮點 printf 又大又慢） */
+static const char *db10(char *b, int v)
+{
+    sprintf(b, "%s%d.%d", v < 0 ? "-" : "", abs(v) / 10, abs(v) % 10);
+    return b;
+}
+
+static int log_head(char *buf, int size, char kind, uint32_t up_s, int32_t tune_hz,
+                    int sig10, int nf10)
+{
+    char a[16];
+    return snprintf(buf, (size_t)size, "%c up=%02lu:%02lu:%02lu tune=%ld sig=%s nf=%d", kind,
+                    (unsigned long)(up_s / 3600), (unsigned long)(up_s / 60 % 60),
+                    (unsigned long)(up_s % 60), (long)tune_hz, db10(a, sig10), nf10 / 10);
+}
+
+void jjy_log_status(const jjy *j, uint32_t up_s, int32_t tune_hz, int sig10, int nf10,
+                    char *buf, int size)
+{
+    char a[16];
+    int k = log_head(buf, size, 'S', up_s, tune_hz, sig10, nf10);
+    if (k < 0 || k >= size)
+        return;
+    snprintf(buf + k, (size_t)(size - k), " sn=%s span=%d sym=%lu frames=%lu good=%d err=%d hist=%s",
+             db10(a, sig10 - nf10), (int)(j->hi - j->lo), (unsigned long)j->symbols,
+             (unsigned long)j->frames, j->good, j->last_err, j->hist);
+}
+
+void jjy_log_frame(const jjy *j, uint32_t up_s, int32_t tune_hz, int sig10, int nf10,
+                   char *buf, int size)
+{
+    int k = log_head(buf, size, 'F', up_s, tune_hz, sig10, nf10);
+    if (k < 0 || k >= size)
+        return;
+    k += snprintf(buf + k, (size_t)(size - k), " err=%d good=%d", j->last_err, j->good);
+    if (k >= size)
+        return;
+    if (j->last_err == 0) {
+        k += snprintf(buf + k, (size_t)(size - k), " jst=%02d:%02d yday=%d year=%d wday=%d",
+                      j->t.hour, j->t.min, j->t.yday, j->t.year, j->t.wday);
+        if (k >= size)
+            return;
+    }
+    snprintf(buf + k, (size_t)(size - k), " sym=%s", j->last_frame);
 }

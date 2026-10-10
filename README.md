@@ -177,6 +177,21 @@ SD 卡根目錄的 `PRESETS.TXT`，一行一個台，可以在電腦上編輯，
 頻寬可以省略（用該模式的預設）。看不懂的行會跳過。第一次按 `f` 才讀檔；
 沒插卡就只有內建的四個台。
 
+## JJY 記錄檔
+
+調諧點在 40 或 60 kHz（±500 Hz）時，自動把解碼狀態附加到 SD 卡的 `JJYLOG.TXT`：
+每分鐘一行狀態（`S`），每解完一幀一行（`F`）。整晚放著收，隔天插卡看。
+統計頁（`i`）第 10 行顯示有沒有在記。
+
+```
+# start up=00:01:12 tune=40000 mode=CW bw=500
+S up=00:02:12 tune=40000 sig=-68.5 nf=-77 sn=8.5 span=9 sym=37 frames=0 good=0 err=0 hist=...
+F up=00:03:01 tune=40000 sig=-63.2 nf=-77 err=0 good=1 jst=22:49 yday=282 year=26 wday=5 sym=M0010...
+```
+
+`up` 是開機後經過的時間（掌機沒有時鐘），`span` 是載波高低準位差（dB，不到 6 視為沒訊號），
+`err` 的意義見 `firmware/jjy.h`。
+
 ## 授權
 
 GPL-3.0。`keys.c`、`TFT_DMA.*`、`loader_offset/*.py` 取自

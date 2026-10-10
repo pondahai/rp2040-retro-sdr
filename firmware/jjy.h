@@ -69,12 +69,28 @@ typedef struct {
 
     /* 給畫面：最近 60 個符號，'0' '1' 'M' '?' */
     char   hist[JJY_HIST + 1];
+    /* 最近解完的那一幀（'0' '1' 'M' '?'），解碼當下複製：frame[] 一秒後就會被下一幀覆寫 */
+    char   last_frame[61];
 } jjy;
 
 void jjy_init(jjy *j);
 
 /* 餵一個包絡點：功率（線性）與時間戳（ms，單調遞增）。 */
 void jjy_push(jjy *j, float power, uint32_t t_ms);
+
+/* 記錄檔（SD 卡 JJYLOG.TXT）的一行，不含換行。拔掉 USB 整晚收的時候，
+ * 隔天從這裡看訊號什麼時候出現、解到了什麼。key=value 以空白分隔：
+ *
+ *   S up=01:23:45 tune=40000 sig=-63.2 nf=-77 sn=13.8 span=9 sym=132 frames=2 good=0 err=-5 hist=…
+ *     每分鐘一行狀態。span = 高低準位差（dB，< 6 視為沒訊號）；hist = 最近 60 個符號
+ *   F up=01:24:00 tune=40000 sig=… nf=… err=0 good=2 jst=22:49 yday=282 year=26 wday=5 sym=M0010…
+ *     每解完一幀一行。err != 0 時沒有 jst 以後的欄位；sym = 這一幀的 60 個符號
+ *
+ * up = 開機後經過的時間（掌機沒有時鐘），sig／nf 是 dBFS × 10。 */
+void jjy_log_status(const jjy *j, uint32_t up_s, int32_t tune_hz, int sig10, int nf10,
+                    char *buf, int size);
+void jjy_log_frame(const jjy *j, uint32_t up_s, int32_t tune_hz, int sig10, int nf10,
+                   char *buf, int size);
 
 /* 鎖定 = 連續兩幀都解成功，而且第二幀剛好是第一幀加一分鐘。 */
 static inline int jjy_locked(const jjy *j) { return j->good >= 2; }
