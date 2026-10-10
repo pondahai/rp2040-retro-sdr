@@ -67,6 +67,8 @@ typedef struct {
     int  show_stats;                  /* 1 = 瀑布圖的位置改顯示統計（鍵盤 I） */
     char stats[UI_STAT_LINES][UI_TEXT_COLS + 1];   /* 平台填 */
     int  tc_locked;
+    int  rec_on;                      /* 1 = 錄音中（鍵盤 R 切換；平台開檔失敗會清回 0） */
+    char rec[UI_TEXT_COLS + 1];       /* 錄音狀態列，平台填；空字串 = 不顯示 */
 
     char entry[12];                   /* 頻率輸入中（kHz） */
     int  entry_len;

@@ -13,8 +13,8 @@ RP2040 掌機上的 LF 直接取樣 SDR：0–250 kHz 的頻譜與瀑布圖，�
 | :--- | :--- | :--- |
 | **M1** | ADC 取樣、寬頻 FFT、頻譜＋瀑布圖、鍵盤分時 | **已上機：每塊 60 ms、不掉塊** |
 | **M2** | 窄頻 DDC、AM／CW／USB／LSB 解調、喇叭出聲 | **已上機：喇叭出聲、無斷音** |
-| M3 | BPC／JJY 解碼 | |
-| M4 | SD 卡錄音、預設清單 | |
+| **M3** | BPC／JJY 解碼 | **JJY 解碼器已上機，尚未實測** |
+| **M4** | SD 卡錄音、預設清單 | **錄音已上機，寫卡速度待實測**；預設清單未做 |
 | M5 | 封面、偏移編譯、收進 bundle | |
 
 ## 硬體：唯一要加的東西
@@ -51,6 +51,7 @@ RP2040 掌機上的 LF 直接取樣 SDR：0–250 kHz 的頻譜與瀑布圖，�
 | `q` | QUIET：暫停 LCD 更新，用來比較 SPI 對雜訊底線的影響 |
 | `t` | GPIO 0 輸出 68.5 kHz 測試訊號（杜邦線靠近天線） |
 | `i` | 統計頁：耗時、時脈、雜訊底線、JJY 狀態（不插 USB 時看數字用） |
+| `r` | SD 卡錄音開始／停止：寬頻原始樣本存成 `RECnnn.WAV`（500 ksps，最長 60 秒）＋`RECnnn.TXT` |
 
 鍵盤矩陣上已經沒有方向鍵（retro-dict 的 HANDOVER 有記載），所以方向靠 D-pad。
 
@@ -77,8 +78,10 @@ firmware/          純 C，PC 與板子共用
   ui.c             逐列產生 RGB565
   font5x7.c        自繪的 5×7 ASCII 字型
   keys.c           鍵盤矩陣 -> 事件（取自 rp2040-retro-dict）
+  wav.c            錄音檔的 .wav 檔頭
   test_pc.c        PC 測試
 loader_offset/     偏移編譯用（取自 rp2040-retro-dict）
+tools/rec_analyze.py  分析錄音：最強訊號、頻譜圖、瀑布圖、輸出 I/Q wav（numpy＋Pillow）
 docs/DESIGN.md     設計文件
 ```
 
@@ -101,6 +104,15 @@ build_offset.bat               :: 偏移版，連結在 0x10004000，給 rp2040-
 
 偏移版的做法與 rp2040-retro-dict 相同，需要旁邊有 `rp2040-retro-loader` 才會產生
 可以直接 USB 燒錄的 `_standalone.uf2`。
+
+## 錄音與分析
+
+插 SD 卡，調到想看的地方，按 `r` 開始、再按一次停止。把卡上的 `RECnnn.WAV` 與
+`RECnnn.TXT` 複製到電腦：
+
+```bat
+python toolsec_analyze.py REC000.WAV --lo 30000 --hi 50000 --iq 40000
+```
 
 ## 授權
 

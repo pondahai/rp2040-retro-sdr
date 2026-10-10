@@ -20,6 +20,7 @@
 #include "font5x7.h"
 #include "jjy.h"
 #include "sdr.h"
+#include "wav.h"
 
 static int g_fail;
 
@@ -546,6 +547,33 @@ int main(void)
               "6 LSB carrier in 2 LSB noise: locked on 22:%02d (want 22:49)", j.t.min);
         CHECK(labs((long)j.t_ms - 120000L) < 60,
               "frame timestamp %lu ms (want 120000)", (unsigned long)j.t_ms);
+    }
+
+    printf("[10] recording: R key and wav header\n");
+    {
+        sdr_init(s);
+        CHECK(!s->rec_on && !s->rec[0], "starts not recording");
+        press(s, 'r');
+        CHECK(s->rec_on, "R starts recording");
+        strcpy(s->rec, "REC000.WAV  3 s  1.5 MB  drop 0");
+        sdr_prepare(s);
+        int seen = 0;
+        for (int i = 0; i < s->ntext; i++)
+            seen |= (strstr(s->text[i].s, "REC000.WAV") ? 1 : 0) | (!strcmp(s->text[i].s, "  REC") ? 2 : 0);
+        CHECK(seen == 3, "status line and REC tag are on screen (seen %d)", seen);
+        press(s, 'r');
+        CHECK(!s->rec_on, "R again stops");
+
+        uint8_t h[WAV_HDR];
+        wav_header(h, 500000, 1000);
+        #define LE32(o) ((uint32_t)h[o] | (uint32_t)h[o+1] << 8 | (uint32_t)h[o+2] << 16 | (uint32_t)h[o+3] << 24)
+        #define LE16(o) ((uint32_t)h[o] | (uint32_t)h[o+1] << 8)
+        CHECK(!memcmp(h, "RIFF", 4) && !memcmp(h + 8, "WAVEfmt ", 8) && !memcmp(h + 36, "data", 4),
+              "wav tags");
+        CHECK(LE32(4) == 2036 && LE32(40) == 2000, "riff %lu / data %lu bytes (want 2036 / 2000)",
+              (unsigned long)LE32(4), (unsigned long)LE32(40));
+        CHECK(LE16(20) == 1 && LE16(22) == 1 && LE32(24) == 500000 && LE32(28) == 1000000 &&
+              LE16(32) == 2 && LE16(34) == 16, "PCM mono 16-bit 500 kHz");
     }
 
     write_glyphs("glyphs.ppm");

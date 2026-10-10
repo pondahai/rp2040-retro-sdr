@@ -202,6 +202,9 @@ int sdr_key(sdr *s, const key_event *ev)
     case 'i':
         s->show_stats = !s->show_stats;
         return 1;
+    case 'r':
+        s->rec_on = !s->rec_on;
+        return 1;
     }
     return 0;
 }
@@ -273,7 +276,10 @@ void sdr_prepare(sdr *s)
     }
     if (s->tx_on)
         text(s, UI_W - 6 * 8 - 4, 4, C_RED, "TX");
-    if (s->quiet)
+    /* 右上角只有一格：錄音 > QUIET > PK。左邊的 BW/STEP/VOL 最長到 x = 268 */
+    if (s->rec_on)
+        text(s, UI_W - 6 * 5 - 4, 4, C_RED, "  REC");
+    else if (s->quiet)
         text(s, UI_W - 6 * 5 - 4, 4, C_RED, "QUIET");
     else if (s->peak_on)
         text(s, UI_W - 6 * 2 - 4, 4, C_AMBER, "PK");
@@ -309,6 +315,9 @@ void sdr_prepare(sdr *s)
     if (s->entering) {
         sprintf(b, "FREQ> %s_ kHz    ENTER=GO  ESC=CANCEL", s->entry);
         text(s, 4, UI_Y_INFO + 18, C_AMBER, b);
+    } else if (s->rec[0]) {
+        /* 錄音中（或剛停）：檔名、秒數、掉塊 —— 比授時碼優先 */
+        text(s, 4, UI_Y_INFO + 18, s->rec_on ? C_RED : C_AMBER, s->rec);
     } else if (s->tc[0]) {
         /* 調在授時台上：顯示解碼。鎖定前是琥珀色，鎖定後是青色 */
         text(s, 4, UI_Y_INFO + 18, s->tc_locked ? C_CYAN : C_AMBER, s->tc);
@@ -329,5 +338,5 @@ void sdr_prepare(sdr *s)
     text(s, 4, UI_Y_HINT + 1, C_DIM,
          "PAD <>TUNE ^vREF  A/B VOL  SEL MODE  START STEP");
     text(s, 4, UI_Y_HINT + 9, C_DIM,
-         "KBD 0-9.ENTER FREQ M B S -/= VOL [ ] A P Q T I");
+         "KBD 0-9.ENTER FREQ M B S -/= VOL [ ] A P Q T I R");
 }

@@ -36,11 +36,14 @@
 #include "hardware/clocks.h"
 #include "hardware/timer.h"
 
+#include <SdFat.h>
+
 #include "TFT_DMA.h"
 
 extern "C" {
 #include "src/rs_sdr.h"
 #include "src/rs_jjy.h"
+#include "src/rs_wav.h"
 }
 
 // ---- 顯示器（spi0）----
@@ -120,6 +123,7 @@ static keys     g_keys;
 static uint16_t g_buf[2][SDR_BLOCK];       // 2 × 64 KB，ADC 雙緩衝
 static uint16_t g_line[2][UI_W];           // 一列算、一列送
 static int      g_cur;                      // DMA 正在寫哪一塊
+static uint32_t g_blk_start[2];             // 每一塊開始取樣的時間（µs），錄音的附檔要用
 
 // 系統時脈。arduino-pico 預設 133 MHz，M1 第一次上機量到一塊要 139 ms
 // （一塊只有 65 ms），所以比照 PicoApple2 超頻到 250 MHz。
@@ -171,6 +175,7 @@ static void captureStart(uint16_t *dst)
     dma_channel_configure(g_adc_dma, &g_adc_cfg, dst, &adc_hw->fifo,
                           SDR_BLOCK, true);
     adc_run(true);
+    g_blk_start[dst == g_buf[1]] = time_us_32();
 }
 
 // 停 ADC，把 GPIO 26 交還給鍵盤。
@@ -630,6 +635,164 @@ static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
     snprintf(L[10], W, "I = back to waterfall");
 }
 
+// ============================================================================
+// M4：SD 卡錄音（spi1）
+//
+// 錄**寬頻原始樣本**：剛抓好的那一塊 64 KB 原封不動寫進 .wav（格式見 wav.h），
+// 趁 DMA 在抓下一塊的 65 ms 裡寫完。不轉換、不另配緩衝 —— Core 1 同時也在讀
+// 同一塊，兩邊都只讀。
+//
+// 錄音時 Core 0 不做 FFT、畫面每秒只更新一次：DSP＋畫面本來就要 60 ms，
+// 再加寫卡一定掉塊。Core 1 照常跑，喇叭還是有聲音。
+//
+// 塊與塊之間有鍵盤掃描的空隙（約 0.7 ms），每塊開頭 SDR_SKIP 點是偏壓回穩的
+// 暫態 —— 這些都照實留在檔案裡，同名 .TXT 記下每一塊的開始時間，分析時自己
+// 切。掉塊（寫卡太慢）也看得出來：兩塊的時間差會多一整塊。
+//
+// 檔案先 preAllocate 成 60 秒的大小，寫的時候 FAT 不用找空間；停止時截短。
+// ============================================================================
+
+#define PIN_SD_SCK  10
+#define PIN_SD_MOSI 11
+#define PIN_SD_MISO 12
+#define PIN_SD_CS   13
+#define REC_SD_MHZ  25                     // clk_peri 250 MHz ÷ 10
+#define REC_MAX_BLOCKS 916                 // 60 s
+#define REC_BYTES   (SDR_BLOCK * 2)
+
+static SdFs     g_sd;
+static FsFile   g_rf;
+static bool     g_sd_ok, g_rec_open;
+static char     g_rec_name[16];
+static uint32_t g_rec_blocks, g_rec_drops0;
+static uint32_t g_rec_t[REC_MAX_BLOCKS];   // 每塊開始取樣的時間（µs）
+static uint32_t g_rec_wr_last, g_rec_wr_max, g_rec_wr_sum;
+static uint32_t g_rec_msg_until;           // 停止後的結果顯示到幾時（ms）
+
+static void recFail(const char *why)
+{
+    g_sdr.rec_on = 0;
+    snprintf(g_sdr.rec, sizeof g_sdr.rec, "REC: %s", why);
+    g_rec_msg_until = millis() + 10000;
+    Serial.printf("rec: %s\n", why);
+}
+
+static void recStart()
+{
+    if (!g_sd_ok) {
+        SPI1.setRX(PIN_SD_MISO);
+        SPI1.setTX(PIN_SD_MOSI);
+        SPI1.setSCK(PIN_SD_SCK);
+        g_sd_ok = g_sd.begin(SdSpiConfig(PIN_SD_CS, DEDICATED_SPI, SD_SCK_MHZ(REC_SD_MHZ), &SPI1));
+        if (!g_sd_ok) {
+            recFail("NO SD CARD");
+            return;
+        }
+    }
+    int i;
+    for (i = 0; i < 1000; i++) {
+        snprintf(g_rec_name, sizeof g_rec_name, "REC%03d.WAV", i);
+        if (!g_sd.exists(g_rec_name))
+            break;
+    }
+    if (i == 1000 || !g_rf.open(g_rec_name, O_RDWR | O_CREAT | O_TRUNC)) {
+        recFail("OPEN FAILED");
+        return;
+    }
+    if (!g_rf.preAllocate((uint64_t)WAV_HDR + (uint64_t)REC_MAX_BLOCKS * REC_BYTES))
+        Serial.println("rec: preAllocate failed, writing anyway");
+    uint8_t h[WAV_HDR];
+    wav_header(h, SP_FS, 0);
+    g_rf.write(h, WAV_HDR);
+    g_rec_open = true;
+    g_rec_blocks = 0;
+    g_rec_drops0 = g_sdr.drops;
+    g_rec_wr_max = g_rec_wr_sum = 0;
+    Serial.printf("rec: %s started, contiguous %d, spi1 %lu Hz\n", g_rec_name,
+                  (int)g_rf.isContiguous(), (unsigned long)spi_get_baudrate(spi1));
+}
+
+static void recStop()
+{
+    uint32_t n = g_rec_blocks * SDR_BLOCK;
+    uint8_t h[WAV_HDR];
+    wav_header(h, SP_FS, n);
+    g_rf.seekSet(0);
+    g_rf.write(h, WAV_HDR);
+    g_rf.truncate((uint64_t)WAV_HDR + (uint64_t)n * 2);
+    g_rf.close();
+    g_rec_open = false;
+    g_sdr.rec_on = 0;
+    uint32_t drops = g_sdr.drops - g_rec_drops0;
+
+    // 附檔：參數＋每塊的開始時間。分析程式（tools/rec_analyze.py）讀這個。
+    char tname[16];
+    memcpy(tname, g_rec_name, sizeof tname);
+    strcpy(tname + 7, "TXT");
+    FsFile t;
+    if (t.open(tname, O_WRONLY | O_CREAT | O_TRUNC)) {
+        char b[96];
+        int k = snprintf(b, sizeof b, "rate %d\nblock %d\nskip %d\ntune %ld\nmode %s\n",
+                         SP_FS, SDR_BLOCK, SDR_SKIP, (long)g_sdr.tune_hz, ddc_mode_name(g_sdr.mode));
+        t.write(b, k);
+        k = snprintf(b, sizeof b, "blocks %lu\ndrops %lu\nsd_mhz %d\nwrite_ms_avg %lu\nwrite_ms_max %lu\n",
+                     (unsigned long)g_rec_blocks, (unsigned long)drops, REC_SD_MHZ,
+                     (unsigned long)(g_rec_blocks ? g_rec_wr_sum / g_rec_blocks / 1000 : 0),
+                     (unsigned long)(g_rec_wr_max / 1000));
+        t.write(b, k);
+        t.write("start_us\n", 9);
+        for (uint32_t i = 0; i < g_rec_blocks; i++) {
+            k = snprintf(b, sizeof b, "%lu\n", (unsigned long)(g_rec_t[i] - g_rec_t[0]));
+            t.write(b, k);
+        }
+        t.close();
+    }
+    uint32_t ds = g_rec_blocks * SDR_BLOCK / (SP_FS / 10);
+    snprintf(g_sdr.rec, sizeof g_sdr.rec, "SAVED %s  %lu.%lu s  drop %lu",
+             g_rec_name, (unsigned long)(ds / 10), (unsigned long)(ds % 10), (unsigned long)drops);
+    g_rec_msg_until = millis() + 10000;
+    Serial.printf("rec: %s, write avg %lu max %lu us\n", g_sdr.rec,
+                  (unsigned long)(g_rec_blocks ? g_rec_wr_sum / g_rec_blocks : 0),
+                  (unsigned long)g_rec_wr_max);
+}
+
+// 每圈一次：跟著 g_sdr.rec_on（鍵盤 R）開檔或收尾。
+static void recPoll()
+{
+    if (g_sdr.rec_on && !g_rec_open) {
+        g_sdr.rec[0] = 0;
+        recStart();
+    } else if (!g_sdr.rec_on && g_rec_open) {
+        recStop();
+    }
+    if (!g_rec_open && g_sdr.rec[0] && (int32_t)(millis() - g_rec_msg_until) > 0)
+        g_sdr.rec[0] = 0;
+}
+
+static void recBlock(const uint16_t *x, uint32_t t_start)
+{
+    uint32_t t = time_us_32();
+    size_t w = g_rf.write(x, REC_BYTES);
+    g_rec_wr_last = time_us_32() - t;
+    if (w != REC_BYTES) {
+        recStop();
+        recFail("WRITE FAILED (CARD FULL?)");
+        return;
+    }
+    g_rec_t[g_rec_blocks++] = t_start;
+    g_rec_wr_sum += g_rec_wr_last;
+    if (g_rec_wr_last > g_rec_wr_max)
+        g_rec_wr_max = g_rec_wr_last;
+    uint32_t sec = g_rec_blocks * SDR_BLOCK / SP_FS;
+    snprintf(g_sdr.rec, sizeof g_sdr.rec, "%s %2lu s %4lu KB drop %lu wr %lu/%lu ms",
+             g_rec_name, (unsigned long)sec,
+             (unsigned long)(g_rec_blocks * (REC_BYTES / 1024)),
+             (unsigned long)(g_sdr.drops - g_rec_drops0),
+             (unsigned long)(g_rec_wr_last / 1000), (unsigned long)(g_rec_wr_max / 1000));
+    if (g_rec_blocks >= REC_MAX_BLOCKS)
+        recStop();
+}
+
 static void pushDdcParams()
 {
     g_p_tune = g_sdr.tune_hz;
@@ -718,15 +881,27 @@ void loop()
     testToneSet(g_sdr.tx_on);
     updateTimecodeLine();
 
-    // DSP
+    // DSP（錄音時換成寫卡）
+    recPoll();
     uint32_t t1 = time_us_32();
-    sdr_block(&g_sdr, g_buf[done], SDR_BLOCK, SDR_SKIP);
+    bool recording = g_rec_open;
+    if (recording)
+        recBlock(g_buf[done], g_blk_start[done]);
+    else
+        sdr_block(&g_sdr, g_buf[done], SDR_BLOCK, SDR_SKIP);
     uint32_t t2 = time_us_32();
 
     // 畫面。QUIET 模式只畫一次（讓使用者看到 QUIET 字樣），之後完全不碰
     // SPI —— 用來比較「LCD 在送」與「LCD 安靜」時的雜訊底線差多少。
     // 瀑布圖照樣在 RAM 裡累積，解除後那一段會以不同的底色出現。
-    if (!g_sdr.quiet) {
+    // 錄音時每秒才畫一次（寫卡＋畫面要擠在一塊的 65 ms 裡）。
+    static uint32_t last_rec_draw;
+    if (recording) {
+        if (now - last_rec_draw >= 1000 && !g_sdr.quiet) {
+            render();
+            last_rec_draw = now;
+        }
+    } else if (!g_sdr.quiet) {
         render();
         painted_quiet = false;
     } else if (!painted_quiet) {
@@ -742,6 +917,8 @@ void loop()
     if (now - last_log >= 1000) {
         const spectrum *sp = &g_sdr.sp;
         last_log = now;
+        if (recording)
+            Serial.printf("rec: %s | proc %lu ms\n", g_sdr.rec, (unsigned long)g_sdr.proc_ms);
         Serial.printf("blk %lu drops %lu | proc %lu ms = scan %lu us + dsp %lu ms "
                       "(K=%d: win %lu fft %lu db %lu post %lu us) + draw %lu ms "
                       "| %lu MHz | NF %d.%d dBFS\n",
