@@ -28,12 +28,14 @@ METAL_D = (60, 55, 51)
 CHROME = (222, 222, 226)
 CHROME_D = (150, 150, 158)
 METER = (244, 238, 220)
-WF_BG = (22, 30, 70)                 # 瀑布圖：深藍底 -> 藍 -> 青 -> 黃（跟機上的調色盤同一個方向）
-WF_NOISE = (40, 60, 140)
-WF_BLU = (60, 110, 220)
-WF_CYN = (80, 210, 230)
-WF_YEL = (250, 220, 90)
-WF_HI = (70, 84, 130)
+SP_BG = (10, 14, 22)                 # 螢幕顏色取自機上畫面
+SP_FILL = (16, 70, 92)
+SP_TRACE = (90, 220, 250)
+WF_SPECK = [(30, 110, 170), (40, 150, 190), (60, 180, 200), (30, 90, 160), (50, 130, 180)]
+WF_YEL = (250, 230, 110)
+WF_RED = (240, 120, 70)
+WF_CURSOR = (255, 80, 40)
+WF_HI = (60, 70, 90)
 
 
 def build():
@@ -79,53 +81,46 @@ def build():
         d.line([(gx0 + 2, y + 1), (gx1 - 2, y + 1)], fill=BODY_L)
     d.line([(gx0 + 1, gy0 + 1), (gx1 - 1, gy0 + 1)], fill=BODY_DD)   # 內緣陰影（受光在左上）
 
-    # 刻度窗改成一塊小螢幕：瀑布圖（SDR 最好認的標誌），2×2 色塊，紅線是調諧游標
-    x0, y0, x1, y1 = 38, 40, 78, 58
-    d.rectangle([x0, y0, x1, y1], fill=WF_BG, outline=OUTL)
+    # 右半整塊是螢幕，畫得跟機上的畫面一樣（firmware/screen.ppm）：
+    # 上半是頻譜（青色軌跡沿著雜訊底線，幾根尖峰，下面填深青），
+    # 下半是瀑布圖（藍青色雜訊顆粒，強訊號是往下流的黃／紅細直線，跟上面的尖峰對齊），
+    # 紅色調諧游標貫穿兩者：頻譜上實線、瀑布上虛線。
+    x0, y0, x1, y1 = 38, 40, 79, 87
+    d.rectangle([x0 - 1, y0 - 1, x1 + 1, y1 + 1], fill=BODY_D, outline=OUTL)   # 螢幕框
+    d.rectangle([x0, y0, x1, y1], fill=SP_BG, outline=OUTL)
+    sx0, sx1 = x0 + 1, x1 - 1
+    sy0, sy1 = y0 + 1, y0 + 21                # 頻譜區
+    wy0, wy1 = sy1 + 2, y1 - 1                # 瀑布區
+    floor = sy1 - 4                           # 雜訊底線
+    peaks = {sx0 + 6: (sy0 + 2, WF_YEL), sx0 + 15: (sy0 + 9, WF_YEL),
+             sx0 + 30: (sy0 + 5, WF_RED), sx0 + 34: (sy0 + 12, WF_YEL)}
+    cursor = sx0 + 15
     wr = random.Random(68500)
-    # 幾條「訊號」：固定在某些欄，強度不同；其餘是深藍底雜訊
-    sigs = {6: WF_YEL, 7: WF_CYN, 13: WF_CYN, 15: WF_BLU, 4: WF_BLU, 17: WF_CYN}
-    for gy in range(y0 + 1, y1, 2):
-        for gi, gx in enumerate(range(x0 + 1, x1, 2)):
-            c = sigs.get(gi)
-            if c is WF_YEL and wr.random() < 0.25:
-                c = WF_CYN                         # 強訊號偶爾弱一點（衰落）
-            elif c is None:
-                c = WF_NOISE if wr.random() < 0.18 else None
-            elif c is not WF_YEL and wr.random() < 0.3:
-                c = WF_NOISE                       # 弱訊號斷斷續續
-            if c:
-                d.rectangle([gx, gy, gx + 1, gy + 1], fill=c)
-    d.line([(x0 + 1, y0 + 1), (x1 - 1, y0 + 1)], fill=WF_HI)   # 玻璃上緣的反光
-    d.line([(61, y0 + 2), (61, y1 - 1)], fill=RED)
-
-    # S 表：小方窗、弧形刻度、指針
-    mx0, my0, mx1, my1 = 38, 62, 55, 77
-    d.rectangle([mx0, my0, mx1, my1], fill=METER, outline=OUTL)
-    d.arc([mx0 + 2, my0 + 3, mx1 - 2, my1 + 9], 200, 340, fill=OUTL)
-    d.arc([mx0 + 2, my0 + 3, mx1 - 2, my1 + 9], 300, 340, fill=RED)
-    d.line([(46, 75), (51, 66)], fill=OUTL)
-    d.line([(mx0 + 1, my1 - 1), (mx1 - 1, my1 - 1)], fill=BODY_L)
-
-    # 調諧大旋鈕：深色金屬，左上高光
-    cx, cy, r = 68, 71, 9
-    d.ellipse([cx - r, cy - r + 1, cx + r, cy + r + 1], fill=METAL_D)   # 底下的影子
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=METAL, outline=OUTL)
-    d.pieslice([cx - r + 1, cy - r + 1, cx + r - 1, cy + r - 1], 180, 270, fill=METAL_L)
-    d.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=METAL, outline=METAL_D)
-    for a in range(0, 360, 30):                      # 滾花
-        import math
-        px = cx + round((r - 1) * math.cos(math.radians(a)))
-        py = cy + round((r - 1) * math.sin(math.radians(a)))
-        im.putpixel((px, py), METAL_D)
-    d.line([(cx, cy - 3), (cx, cy - 1)], fill=RED_L)    # 刻線
-
-    # 波段按鍵：一排四顆
-    for i in range(4):
-        bx = 39 + i * 10
-        d.rectangle([bx, 82, bx + 7, 87], fill=BODY_L, outline=OUTL)
-        d.line([(bx + 1, 86), (bx + 6, 86)], fill=BODY_D)
-    d.rectangle([39 + 1, 83, 39 + 6, 85], fill=RED)   # 按下的那顆
+    # 頻譜：每欄一個高度，雜訊底線上下抖，尖峰處拉高；軌跡以下填深青
+    prev = floor
+    for x in range(sx0, sx1 + 1):
+        h = peaks[x][0] if x in peaks else floor + wr.choice((-1, 0, 0, 1))
+        for y in range(h + 1, sy1 + 1):
+            im.putpixel((x, y), SP_FILL)
+        lo, hi = min(h, prev), max(h, prev)
+        for y in range(lo, hi + 1):           # 跟左鄰連成實線
+            im.putpixel((x, y), SP_TRACE)
+        prev = h if x not in peaks else floor
+    d.line([(sx0, sy1 + 1), (sx1, sy1 + 1)], fill=OUTL)         # 頻譜與瀑布的分隔
+    # 瀑布：每個像素是雜訊顆粒，訊號欄是往下流的細直線（偶爾衰落一格）
+    for y in range(wy0, wy1 + 1):
+        for x in range(sx0, sx1 + 1):
+            c = wr.choice(WF_SPECK)
+            if x in peaks and wr.random() > 0.08:
+                c = peaks[x][1]
+            im.putpixel((x, y), c)
+    # 游標
+    for y in range(sy0, sy1 + 1):
+        im.putpixel((cursor, y), WF_CURSOR)
+    for y in range(wy0, wy1 + 1):
+        if (y - wy0) & 2:
+            im.putpixel((cursor, y), WF_CURSOR)
+    d.line([(x0 + 1, y0 + 1), (x1 - 1, y0 + 1)], fill=WF_HI)     # 玻璃上緣的反光
 
     # 機腳
     for fx in (9, 72):
