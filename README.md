@@ -28,6 +28,51 @@ RP2040 掌機上的 LF 直接取樣 SDR：0–250 kHz 的頻譜與瀑布圖，�
 
 天線是 3–10 m 的電線，越長越好。為什麼偏壓是 0.41 V 而不是中點，見 DESIGN.md §1.1。
 
+## 系統方塊圖
+
+```mermaid
+flowchart TB
+    ANT["天線 3–10 m 電線"] --> BIAS["偏壓網路 330k / 47k / 1 nF<br/>偏壓 ≈ 0.41 V"]
+    BIAS --> G26{{"GPIO 26 分時"}}
+    G26 -- "取樣 65.5 ms" --> ADC["ADC 500 ksps<br/>DMA 雙緩衝 2 × 32768 點"]
+    G26 -- "掃描 ~1 ms" --> KBD["鍵盤矩陣<br/>74HC595 / 165"]
+
+    subgraph CORE0["Core 0"]
+        direction TB
+        KEYS["按鍵 keys.c → sdr.c<br/>（＋D-pad、A/B、START/SELECT）"]
+        FFT["寬頻 FFT<br/>4096 點 × K 段、NF、峰值保持"]
+        REC["錄音（取代 FFT）<br/>原始樣本 → .wav"]
+        UI["畫面：頻譜、瀑布圖<br/>資訊列、統計頁"]
+    end
+
+    subgraph CORE1["Core 1"]
+        direction TB
+        DDC["DDC<br/>NCO → CIC ÷8 ÷4 → FIR 127 階"]
+        DEM["解調 AM / CW / USB / LSB<br/>AGC"]
+        JJY["JJY 解碼<br/>包絡 122 Hz"]
+        AUD["音訊環形緩衝<br/>15625 Hz、計時中斷"]
+    end
+
+    KBD --> KEYS
+    ADC -- "剛抓好的一塊" --> FFT
+    ADC -.-> REC
+    ADC -- "緩衝區編號＋空隙<br/>（跨核 FIFO）" --> DDC
+    KEYS -- "調諧、模式、頻寬" --> DDC
+    FFT --> UI
+    DDC --> DEM --> AUD
+    DDC -- "通帶功率" --> JJY
+    JJY -- "解碼狀態" --> UI
+
+    UI -- "spi0 62.5 MHz" --> LCD["ILI9341 320×240"]
+    REC -- "spi1 25 MHz" --> SD["SD 卡<br/>RECnnn.WAV / .TXT"]
+    AUD -- "GPIO 7 PWM 500 kHz" --> AMP["RC → PAM8403<br/>→ 喇叭 / 耳機"]
+    SD -. "拿到電腦" .-> PC["tools/rec_analyze.py"]
+```
+
+天線訊號和鍵盤時脈輪流用 GPIO 26：取樣一塊 65.5 ms，中間掃一次鍵盤約 1 ms。
+同一塊樣本 Core 0 拿去做頻譜（錄音時改成寫進 SD 卡），Core 1 拿去解調出聲。
+細節見 [DESIGN.md §2](docs/DESIGN.md)。
+
 ## 畫面與按鍵
 
 ![M1 畫面（PC 模擬）](docs/m1_screen.png)

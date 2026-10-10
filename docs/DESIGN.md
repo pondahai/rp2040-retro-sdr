@@ -104,6 +104,47 @@
 
 ## 2. 系統架構
 
+```mermaid
+flowchart TB
+    ANT["天線 3–10 m 電線"] --> BIAS["偏壓網路 330k / 47k / 1 nF<br/>偏壓 ≈ 0.41 V"]
+    BIAS --> G26{{"GPIO 26 分時"}}
+    G26 -- "取樣 65.5 ms" --> ADC["ADC 500 ksps<br/>DMA 雙緩衝 2 × 32768 點"]
+    G26 -- "掃描 ~1 ms" --> KBD["鍵盤矩陣<br/>74HC595 / 165"]
+
+    subgraph CORE0["Core 0"]
+        direction TB
+        KEYS["按鍵 keys.c → sdr.c<br/>（＋D-pad、A/B、START/SELECT）"]
+        FFT["寬頻 FFT<br/>4096 點 × K 段、NF、峰值保持"]
+        REC["錄音（取代 FFT）<br/>原始樣本 → .wav"]
+        UI["畫面：頻譜、瀑布圖<br/>資訊列、統計頁"]
+    end
+
+    subgraph CORE1["Core 1"]
+        direction TB
+        DDC["DDC<br/>NCO → CIC ÷8 ÷4 → FIR 127 階"]
+        DEM["解調 AM / CW / USB / LSB<br/>AGC"]
+        JJY["JJY 解碼<br/>包絡 122 Hz"]
+        AUD["音訊環形緩衝<br/>15625 Hz、計時中斷"]
+    end
+
+    KBD --> KEYS
+    ADC -- "剛抓好的一塊" --> FFT
+    ADC -.-> REC
+    ADC -- "緩衝區編號＋空隙<br/>（跨核 FIFO）" --> DDC
+    KEYS -- "調諧、模式、頻寬" --> DDC
+    FFT --> UI
+    DDC --> DEM --> AUD
+    DDC -- "通帶功率" --> JJY
+    JJY -- "解碼狀態" --> UI
+
+    UI -- "spi0 62.5 MHz" --> LCD["ILI9341 320×240"]
+    REC -- "spi1 25 MHz" --> SD["SD 卡<br/>RECnnn.WAV / .TXT"]
+    AUD -- "GPIO 7 PWM 500 kHz" --> AMP["RC → PAM8403<br/>→ 喇叭 / 耳機"]
+    SD -. "拿到電腦" .-> PC["tools/rec_analyze.py"]
+```
+
+實線是每一塊都會走的路；虛線的「錄音」只在按 `r` 之後取代寬頻 FFT。
+
 ### 2.1 核心分工
 
 | | 工作 |
@@ -351,7 +392,7 @@ PC 測試三層都過（格式、雜訊包絡、40 kHz 載波經 DDC 端到端�
 | **M3** | BPC／JJY 解碼 | 收到真實訊號並連續兩幀一致 |
 | **M4** | SD 卡錄音（`.wav`）、預設清單 | 錄下的檔案能在電腦上用 SDR 軟體開啟 |
 | **M5** | 封面（依 `ICON-STYLE.md`）、連結到 `0x10004000`、收進 bundle | 從載入器選單啟動 |
-| **文件** | 繪製本系統的方塊圖：天線／偏壓網路 → GPIO 26 分時（ADC／鍵盤）→ Core 0（FFT、畫面）與 Core 1（DDC、解調、JJY）→ LCD／喇叭 | 放進 README 與本文件，看圖就懂訊號與資料怎麼流 |
+| ~~**文件**~~ | **已完成**（§2、README）。繪製本系統的方塊圖：天線／偏壓網路 → GPIO 26 分時（ADC／鍵盤）→ Core 0（FFT、畫面）與 Core 1（DDC、解調、JJY）→ LCD／喇叭 | 放進 README 與本文件，看圖就懂訊號與資料怎麼流 |
 
 M2 的測試訊號可以由掌機自己產生：在閒置的 GPIO 0 輸出 68.5 kHz 方波，旁邊繞一圈線當作「發射天線」。不必有外部儀器就能驗證整條訊號鏈。
 實作是用 PWM（鍵盤 `t`，68493 Hz），不是 PIO；杜邦線靠近天線時 S/N 約 10 dB。
