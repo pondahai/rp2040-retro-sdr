@@ -21,3 +21,5 @@ desktop.ini
 __pycache__/
 *.pyc
 recordings/
+# 錄音解調的試聽檔（本機分析用）
+analysis/
