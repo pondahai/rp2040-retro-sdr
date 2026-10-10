@@ -8,7 +8,7 @@
 //
 // Core 1（M2）：
 //   4. 同一塊樣本交給 ddc.c（混頻、CIC、FIR、解調、AGC）-> 音訊環形緩衝
-//   5. 計時中斷每 128 µs 取一個樣本寫進 GPIO 7 的 PWM -> PAM8403 -> 喇叭
+//   5. 計時中斷每 64 µs 取一個樣本寫進 GPIO 7 的 PWM -> PAM8403 -> 喇叭
 //
 // **DSP 與畫面邏輯一行都不在這裡。** fft.c、spectrum.c、wfall.c、sdr.c、
 // ui.c 都是純 C，在 PC 上用合成訊號跑過（firmware/test_pc.c）。
@@ -418,9 +418,10 @@ static void render()
 // Core 0 每抓完一塊就把緩衝區編號丟進跨核 FIFO。那一塊要等下一塊抓完（65 ms
 // 之後）才會被 DMA 覆寫，Core 1 只要在那之前做完就好 —— 實測見序列埠的 ddc。
 //
-// 音訊的產出是一陣一陣的（每 66.5 ms 一次 512 個），播放是等速的。塊與塊
-// 之間有鍵盤掃描的空隙，產出率比 7812.5 Hz 略低約 1.6%，所以播放間隔會依
-// 環形緩衝的水位在 127/128/130 µs 之間微調，不讓它見底也不讓它溢出。
+// 音訊的產出是一陣一陣的（每 66.5 ms 一次 1008 個），播放是等速的。塊與塊
+// 之間有鍵盤掃描的空隙，產出率比 15625 Hz 略低約 1.6%，所以播放間隔會依
+// 環形緩衝的水位在 63/64/68 µs 之間微調，不讓它見底也不讓它溢出。
+// （音訊取樣率原本是 7812.5 Hz、128 µs，見 ddc.h 為什麼改成兩倍。）
 // ============================================================================
 
 static ddc g_ddc;                          // 只有 Core 1 碰
@@ -436,7 +437,7 @@ static volatile uint32_t g_p_seq;
 static volatile int      g_vol;            // 0..SDR_VOL_MAX
 static volatile bool     g_core0_ready;
 
-#define AUD_N 2048                         // 2 的次方
+#define AUD_N 4096                         // 2 的次方
 static int16_t           g_aud[AUD_N];
 static volatile uint32_t g_aud_w, g_aud_r; // 只增不減，相減就是水位
 static volatile uint32_t g_aud_under;      // 播放時沒東西可播的次數
@@ -460,12 +461,12 @@ static int64_t audioTick(alarm_id_t, void *)
 
     // 負值 = 以上一次的預定時間為準再過這麼久（不累積誤差）
     //
-    // 水位要停在一塊（512）以上：產出是每 66.5 ms 一次倒進 512 個，兩次之間
-    // 要撐得住。第一版門檻設在 256，上機實測每秒見底約 56 次（喀喀聲）。
-    // 停在 768 附近 = 約 0.1 s 的延遲，換來不斷音。
-    if (fill < 768)  return -135;          // 7407 Hz，明顯比產出（約 7580）慢 -> 回升
-    if (fill > 1280) return -127;          // 7874 Hz，比產出快一點 -> 水位下降
-    return -128;
+    // 水位要停在一塊（1008）以上：產出是每 66.5 ms 一次倒進 1008 個，兩次之間
+    // 要撐得住。7812.5 Hz 時第一版門檻設在半塊，上機實測每秒見底約 56 次
+    // （喀喀聲）。停在 1536 附近 = 約 0.1 s 的延遲，換來不斷音。
+    if (fill < 1536) return -68;           // 14706 Hz，明顯比產出（約 15160）慢 -> 回升
+    if (fill > 2560) return -63;           // 15873 Hz，比產出快 -> 水位下降
+    return -64;
 }
 
 static void audioBegin()
@@ -489,7 +490,7 @@ void setup1()
     // 鬧鐘池建在 Core 1：中斷就跑在 Core 1，不會被 Core 0 的 FFT 或 SPI 拖慢
     // （PicoApple2 的音訊重放也是這樣做）
     alarm_pool_t *pool = alarm_pool_create_with_unused_hardware_alarm(4);
-    alarm_pool_add_alarm_in_us(pool, 128, audioTick, NULL, true);
+    alarm_pool_add_alarm_in_us(pool, 64, audioTick, NULL, true);
 }
 
 void loop1()
@@ -668,6 +669,7 @@ static uint32_t g_rec_blocks, g_rec_drops0;
 static uint32_t g_rec_t[REC_MAX_BLOCKS];   // 每塊開始取樣的時間（µs）
 static uint32_t g_rec_wr_last, g_rec_wr_max, g_rec_wr_sum;
 static uint32_t g_rec_msg_until;           // 停止後的結果顯示到幾時（ms）
+static int      g_rec_skip;                // 開檔後先丟掉幾塊，見 recStart()
 
 static void recFail(const char *why)
 {
@@ -677,8 +679,14 @@ static void recFail(const char *why)
     Serial.printf("rec: %s\n", why);
 }
 
+// 開檔（第一次還要初始化卡、找空檔名、preAllocate 60 MB）要花幾百 ms，
+// 這段時間 DMA 早就抓完下一塊、停著等。第一版照寫不誤：檔案裡的頭兩塊
+// 各自完整，但第 1、2 塊之間空了約 0.4 s（REC000／REC001 都是）。
+// 現在開檔那一圈的那塊不寫，下一圈那塊（開檔期間抓的、後面接不上）也丟掉，
+// 從第三圈起寫，檔案從第一塊就是連續的。
 static void recStart()
 {
+    uint32_t t_open = time_us_32();
     if (!g_sd_ok) {
         SPI1.setRX(PIN_SD_MISO);
         SPI1.setTX(PIN_SD_MOSI);
@@ -706,9 +714,11 @@ static void recStart()
     g_rf.write(h, WAV_HDR);
     g_rec_open = true;
     g_rec_blocks = 0;
-    g_rec_drops0 = g_sdr.drops;
+    g_rec_skip = 2;
+    g_rec_drops0 = g_sdr.drops;               // 還在丟的時候就按停止也算得對
     g_rec_wr_max = g_rec_wr_sum = 0;
-    Serial.printf("rec: %s started, contiguous %d, spi1 %lu Hz\n", g_rec_name,
+    Serial.printf("rec: %s started in %lu ms, contiguous %d, spi1 %lu Hz\n", g_rec_name,
+                  (unsigned long)((time_us_32() - t_open) / 1000),
                   (int)g_rf.isContiguous(), (unsigned long)spi_get_baudrate(spi1));
 }
 
@@ -771,6 +781,13 @@ static void recPoll()
 
 static void recBlock(const uint16_t *x, uint32_t t_start)
 {
+    if (g_rec_skip > 0) {
+        // 掉塊從丟完之後才開始算：開檔那一圈造成的那一次不算錄音的
+        if (--g_rec_skip == 0)
+            g_rec_drops0 = g_sdr.drops;
+        snprintf(g_sdr.rec, sizeof g_sdr.rec, "%s starting...", g_rec_name);
+        return;
+    }
     uint32_t t = time_us_32();
     size_t w = g_rf.write(x, REC_BYTES);
     g_rec_wr_last = time_us_32() - t;

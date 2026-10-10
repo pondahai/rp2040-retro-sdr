@@ -1,6 +1,6 @@
-/* 窄頻 DDC 與解調：一塊 500 ksps 的 ADC 樣本進來，7812.5 Hz 的音訊出去。
+/* 窄頻 DDC 與解調：一塊 500 ksps 的 ADC 樣本進來，15625 Hz 的音訊出去。
  *
- *   x ─→ NCO 混頻 ─→ CIC³ ÷8 ─→ CIC³ ÷8 ─→ FIR（通道濾波）─→ 解調 ─→ AGC ─→ 音訊
+ *   x ─→ NCO 混頻 ─→ CIC³ ÷8 ─→ CIC³ ÷4 ─→ FIR（通道濾波）─→ 解調 ─→ AGC ─→ 音訊
  *        (e^{-j2πf_LO t})  int32       int64      127 階，對稱
  *
  * 四種模式用同一條鏈，差別只在本振放哪裡、濾波器多寬、最後怎麼取：
@@ -10,7 +10,10 @@
  *   LSB  本振 = 調諧點 − 中心；濾波；取共軛後同上（頻率翻轉）
  *   AM   本振 = 調諧點；濾波；取振幅 |z|，去 DC
  *
- * 為什麼 ÷64 而不是 ÷62.5 到 8 kHz：整數抽取，一塊 32768 點剛好 512 個音訊樣本。
+ * 為什麼 ÷32（15625 Hz）：整數抽取，一塊 32768 點剛好 1024 個音訊樣本。
+ * 第一版是 ÷64（7812.5 Hz），AM 只聽得到 3 kHz 以下，而且 CIC 的第一個零點
+ * 在 7812.5 Hz、3 kHz 已經掉 6.7 dB —— 跟電腦上解調同一段錄音比，明顯比較悶。
+ * ÷32 之後零點在 15625 Hz，3 kHz 只掉 1.6 dB，AM 通帶可以開到 ±4 kHz。
  *
  * 為什麼拆兩級 ÷8：CIC 靠模數運算吃溢位，前提是暫存器裝得下**輸出**。
  * 單級 ÷64 要 44 位元，只能用 int64，而 M0+ 只有 8 個低位暫存器，六個 int64
@@ -18,7 +21,7 @@
  * 拆成兩級之後，跑在 500 kHz 的第一級只長 9 位元：樣本（扣 DC 後最大約
  * ±3587，12 位元）× q10 本振 × 2^9 < 2^31，int32 就夠；int64 只留給
  * 62.5 kHz 的第二級，次數少 8 倍。
- * 兩級 CIC³(÷8) 串接的響應與單級 CIC³(÷64) **完全相同**（sinc 比值相乘，
+ * 兩級 CIC³ 串接的響應與單級 CIC³(÷32) **完全相同**（sinc 比值相乘，
  * 中間項互消），濾波特性不變。
  *
  * 純 C，不知道板子存在（test_pc.c 驗證）。板子上跑在 Core 1。
@@ -29,10 +32,10 @@
 #include <stdint.h>
 
 #define DDC_FS      500000
-#define DDC_DECIM   64
-#define DDC_AFS_X2  15625               /* 音訊取樣率 × 2 = 7812.5 Hz × 2 */
+#define DDC_DECIM   32
+#define DDC_AFS_X2  31250               /* 音訊取樣率 × 2 = 15625 Hz × 2 */
 #define DDC_TAPS    127
-#define DDC_ENV_DECIM 64                /* 7812.5 / 64 ≈ 122 Hz，每 8.2 ms 一點 */
+#define DDC_ENV_DECIM 128               /* 15625 / 128 ≈ 122 Hz，每 8.2 ms 一點 */
 #define DDC_ENV_MAX   16
 
 enum { DDC_AM = 0, DDC_CW, DDC_USB, DDC_LSB, DDC_NMODES };
@@ -47,7 +50,7 @@ typedef struct {
 
     /* 本振 */
     uint32_t lo_phase, lo_step;         /* 500 kHz 下 */
-    uint32_t bfo_phase, bfo_step;       /* 7812.5 Hz 下，把基頻搬回音訊 */
+    uint32_t bfo_phase, bfo_step;       /* 15625 Hz 下，把基頻搬回音訊 */
     int      conj;                      /* LSB 要翻頻 */
 
     /* CIC 第一級（500 kHz，int32；用 uint32 讓溢位有定義） */

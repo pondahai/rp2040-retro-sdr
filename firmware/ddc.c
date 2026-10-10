@@ -22,16 +22,22 @@
 static int16_t s_sin[NCO_N];
 static int s_ready;
 
-/* CIC 輸出 -> FIR 輸入。滿刻度 2^11 × 2^10（本振）× 2^18（兩級 CIC）= 2^39，
- * >>12 之後約 2^27，與 fir_sym() 的位元預算一致。 */
-#define CIC_SHIFT 12
+/* CIC 輸出 -> FIR 輸入。滿刻度 2^11 × 2^10（本振）× 2^15（兩級 CIC：÷8 長 9 位元、
+ * ÷4 長 6 位元）= 2^36，>>9 之後約 2^27，與 fir_sym() 的位元預算一致。 */
+#define CIC_SHIFT 9
 
 /* AGC：包絡放開的速度（每個音訊樣本乘一次，約 0.5 s 降 1/e），以及增益上限
  * 對應的最小包絡。沒有訊號時雜訊會被放大到 32767·0.5·(雜訊/AGC_FLOOR)，
  * 這個值要上機聽了再調。 */
-#define AGC_DECAY 0.99975f
+#define AGC_DECAY 0.999875f
 #define AGC_FLOOR 4000.0f
 #define AGC_TARGET 16000.0f
+/* AM 依載波定增益（見 ddc_block 的解調段）。AM_FLOOR 是載波的下限：比它弱
+ * 的電台增益不再加大 —— REC001 上沒電台的地方 am_dc 約 15000、1026 kHz 混疊
+ * 約 106000；下限設 60000，沒電台時才不會把雜訊放得比電台還大。 */
+#define AM_TARGET  24000.0f
+#define AM_FLOOR   60000.0f
+#define AM_LIMIT   30000.0f
 
 uint32_t (*ddc_clock_us)(void);
 
@@ -73,7 +79,7 @@ static inline int64_t fir_sym(const int32_t *x, const int16_t *taps)
 
 static const char *const MODE_NAME[DDC_NMODES] = { "AM", "CW", "USB", "LSB" };
 
-static const int BW_AM[]  = { 4000, 6000, 0 };
+static const int BW_AM[]  = { 8000, 6000, 4000, 0 };
 static const int BW_CW[]  = { 250, 500, 1000, 0 };
 static const int BW_SSB[] = { 1800, 2400, 2700, 0 };
 
@@ -93,7 +99,7 @@ const char *ddc_mode_name(int mode)
 
 int ddc_default_bw(int mode)
 {
-    return mode == DDC_AM ? 6000 : mode == DDC_CW ? 500 : 2400;
+    return mode == DDC_AM ? 8000 : mode == DDC_CW ? 500 : 2400;
 }
 
 int ddc_next_bw(int mode, int bw_hz)
@@ -157,7 +163,7 @@ void ddc_set(ddc *d, int32_t tune_hz, int mode, int bw_hz)
     }
 
     /* 通道濾波器：Hamming 窗 sinc 低通，截止 bw/2，係數和 = 32768（q15 增益 1）。
-     * 127 階在 7812.5 Hz 下過渡帶約 200 Hz，所以 CW 最窄給到 250 Hz。 */
+     * 127 階在 15625 Hz 下過渡帶約 400 Hz（7812.5 Hz 時是 200 Hz）。 */
     {
         double fc = bw_hz / 2.0 / afs;        /* 正規化截止頻率（相對取樣率） */
         double h[DDC_TAPS], sum = 0;
@@ -235,11 +241,11 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
         d->integ[0][0] += ya; d->integ[0][1] += d->integ[0][0]; d->integ[0][2] += d->integ[0][1];
         d->integ[1][0] += yb; d->integ[1][1] += d->integ[1][0]; d->integ[1][2] += d->integ[1][1];
 
-        if (++d->dec < 8)
+        if (++d->dec < DDC_DECIM / 8)
             continue;
         d->dec = 0;
 
-        /* ---- 以下每 64 個輸入跑一次：第二級梳狀段、FIR、解調 ---- */
+        /* ---- 以下每 DDC_DECIM 個輸入跑一次：第二級梳狀段、FIR、解調 ---- */
         uint32_t tp = now_us();
         int64_t ci, cq, t;
         int64_t i2b = d->integ[0][2], q2b = d->integ[1][2];
@@ -280,7 +286,7 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
         float y;
         if (d->mode == DDC_AM) {
             float mag = sqrtf(pw);
-            d->am_dc += (mag - d->am_dc) * 0.002f;
+            d->am_dc += (mag - d->am_dc) * 0.001f;     /* τ ≈ 64 ms */
             y = mag - d->am_dc;
         } else {
             /* Re{(zi + j·zq)·e^{+jφ}} = zi·cosφ − zq·sinφ */
@@ -291,11 +297,26 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
             y = zi * bc - zq * bs;
         }
 
-        /* AGC：快攻慢放。包絡有下限，沒訊號時不會把雜訊放到滿。 */
-        float a = y < 0 ? -y : y;
-        d->agc_env = a > d->agc_env ? a : d->agc_env * AGC_DECAY;
-        float env = d->agc_env > AGC_FLOOR ? d->agc_env : AGC_FLOOR;
-        float o = y * (AGC_TARGET / env);
+        float o;
+        if (d->mode == DDC_AM) {
+            /* AM：增益跟著載波（am_dc），不跟著音訊。載波不隨節目內容變，
+             * 所以字與字之間的停頓不會被拉高、調變的大小聲原樣保留，
+             * 只有衰落才會改變增益。100% 調變時 |y| ≈ 載波 -> AM_TARGET。 */
+            float c = d->am_dc > AM_FLOOR ? d->am_dc : AM_FLOOR;
+            o = y * (AM_TARGET / c);
+            /* 限幅：只有快削頂時才壓。電台的峰值碰不到（REC001 的 1026 kHz
+             * 峰值約 28500），沒有載波時的雜訊（等於 100% 調變）會被它擋住。 */
+            float a = o < 0 ? -o : o;
+            d->agc_env = a > d->agc_env ? a : d->agc_env * AGC_DECAY;
+            if (d->agc_env > AM_LIMIT)
+                o *= AM_LIMIT / d->agc_env;
+        } else {
+            /* CW／SSB 沒有載波：快攻慢放。包絡有下限，沒訊號時不會把雜訊放到滿。 */
+            float a = y < 0 ? -y : y;
+            d->agc_env = a > d->agc_env ? a : d->agc_env * AGC_DECAY;
+            float env = d->agc_env > AGC_FLOOR ? d->agc_env : AGC_FLOOR;
+            o = y * (AGC_TARGET / env);
+        }
         if (o > 32767.0f) o = 32767.0f;
         if (o < -32767.0f) o = -32767.0f;
 
