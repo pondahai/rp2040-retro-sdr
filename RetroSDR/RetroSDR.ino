@@ -43,6 +43,7 @@
 extern "C" {
 #include "src/rs_sdr.h"
 #include "src/rs_jjy.h"
+#include "src/rs_bpc.h"
 #include "src/rs_wav.h"
 #include "src/rs_preset.h"
 #include "src/rs_eq.h"
@@ -431,6 +432,7 @@ static ddc g_ddc;                          // 只有 Core 1 碰
 // 授時碼解碼器：Core 1 寫，Core 0 只讀（畫面用，讀到一半被改也只是某一格
 // 符號晚一圈才更新，不影響解碼本身）。
 static jjy g_jjy;
+static bpc g_bpc;                          // 同上，BPC（68.5 kHz）。兩個都一直在跑，畫面看調諧點選一個
 static volatile uint32_t g_env_now;        // 最新一個包絡點的時間戳（ms）
 
 // Core 0 寫、Core 1 讀。改了就把 seq 加一，Core 1 在下一塊開頭套用。
@@ -507,6 +509,7 @@ void setup1()
         tight_loop_contents();
     ddc_init(&g_ddc);
     jjy_init(&g_jjy);
+    bpc_init(&g_bpc);
     // 鬧鐘池建在 Core 1：中斷就跑在 Core 1，不會被 Core 0 的 FFT 或 SPI 拖慢
     // （PicoApple2 的音訊重放也是這樣做）
     alarm_pool_t *pool = alarm_pool_create_with_unused_hardware_alarm(4);
@@ -527,8 +530,10 @@ void loop1()
         seq_applied = seq;
         int32_t old = g_ddc.tune_hz;
         ddc_set(&g_ddc, g_p_tune, g_p_mode, g_p_bw);
-        if (g_p_tune != old)
+        if (g_p_tune != old) {
             jjy_init(&g_jjy);               // 換台了，前面的符號不算數
+            bpc_init(&g_bpc);
+        }
     }
 
     uint32_t t0 = time_us_32();
@@ -546,8 +551,10 @@ void loop1()
     eq_run(&s_eq, out, n);
     g_ddc_us = time_us_32() - t0;
 
-    for (int k = 0; k < g_ddc.env_n; k++)
+    for (int k = 0; k < g_ddc.env_n; k++) {
         jjy_push(&g_jjy, g_ddc.env[k], g_ddc.env_ms[k]);
+        bpc_push(&g_bpc, g_ddc.env[k], g_ddc.env_ms[k]);
+    }
     if (g_ddc.env_n)
         g_env_now = g_ddc.env_ms[g_ddc.env_n - 1];
 
@@ -560,41 +567,64 @@ void loop1()
 }
 
 // ============================================================================
-// 授時碼狀態列：調在 JJY（40 / 60 kHz ±500 Hz）上才顯示
+// 授時碼狀態列：調在 JJY（40 / 60 kHz ±500 Hz）或 BPC（68.5 kHz ±500 Hz）上才顯示
 //
 //   JJY 22:49:37 OK  ...M0010M01001  （鎖定：時間每秒往前走）
 //   JJY --:--:--     ...M00?10       （還沒解出來）
+//   BPC 22:49:37 OK  ...M2022301122  （BPC 是四進位，符號 0–3）
 //
-// 時間 = 最近解出的那一幀（代表它的 M 那一刻）＋ 從那一刻到現在的時間。
+// 時間 = 最近解出的那一幀（代表它的標記那一刻）＋ 從那一刻到現在的時間。
 // 兩個時間戳都來自 DDC 的取樣計數，所以跟 millis() 無關，也把鍵盤掃描的
-// 空檔算進去了。
+// 空檔算進去了。JJY 是日本時間（UTC+9），BPC 是北京時間（UTC+8）。
 // ============================================================================
+
+enum { TC_NONE, TC_JJY, TC_BPC };
+
+static int tcSource()
+{
+    int32_t f = g_sdr.tune_hz;
+    if ((f > 39500 && f < 40500) || (f > 59500 && f < 60500))
+        return TC_JJY;
+    if (f > 68000 && f < 69000)
+        return TC_BPC;
+    return TC_NONE;
+}
 
 static void updateTimecodeLine()
 {
-    int32_t f = g_sdr.tune_hz;
-    if (!((f > 39500 && f < 40500) || (f > 59500 && f < 60500))) {
+    int src = tcSource();
+    if (src == TC_NONE) {
         g_sdr.tc[0] = 0;
         g_sdr.tc_locked = 0;
         return;
     }
+    int good, locked;
+    uint32_t t_ms, base;
+    const char *hist;
+    if (src == TC_JJY) {
+        good = g_jjy.good; locked = jjy_locked(&g_jjy); t_ms = g_jjy.t_ms;
+        base = (uint32_t)(g_jjy.t.hour * 3600 + g_jjy.t.min * 60);
+        hist = g_jjy.hist + JJY_HIST;
+    } else {
+        good = g_bpc.good; locked = bpc_locked(&g_bpc); t_ms = g_bpc.t_ms;
+        base = (uint32_t)(g_bpc.t.hour * 3600 + g_bpc.t.min * 60 + g_bpc.t.sec);
+        hist = g_bpc.hist + BPC_HIST;
+    }
     char tbuf[16];
     const char *flag = "  ";
-    if (g_jjy.good >= 1) {
-        uint32_t el = (g_env_now - g_jjy.t_ms) / 1000;
-        uint32_t secs = (uint32_t)(g_jjy.t.hour * 3600 + g_jjy.t.min * 60) + el;
-        secs %= 86400;
+    if (good >= 1) {
+        uint32_t secs = (base + (g_env_now - t_ms) / 1000) % 86400;
         snprintf(tbuf, sizeof tbuf, "%02lu:%02lu:%02lu", (unsigned long)(secs / 3600),
                  (unsigned long)(secs / 60 % 60), (unsigned long)(secs % 60));
-        flag = jjy_locked(&g_jjy) ? "OK" : "? ";
+        flag = locked ? "OK" : "? ";
     } else {
         strcpy(tbuf, "--:--:--");
     }
     // 符號放最右邊，最新的在最後面
     int room = UI_TEXT_COLS - 17;
-    snprintf(g_sdr.tc, sizeof g_sdr.tc, "JJY %s %s %s", tbuf, flag,
-             g_jjy.hist + JJY_HIST - room);
-    g_sdr.tc_locked = jjy_locked(&g_jjy);
+    snprintf(g_sdr.tc, sizeof g_sdr.tc, "%s %s %s %s", src == TC_JJY ? "JJY" : "BPC", tbuf,
+             flag, hist - room);
+    g_sdr.tc_locked = locked;
 }
 
 // 調諧點 ±1 bin 的最大值（dBFS×10）。序列埠與統計頁共用。
@@ -621,8 +651,10 @@ static const char *db10(char *b, int v)
 // 那時候讀不到序列埠。這頁只在打開時才組字串，不打開不花時間。
 // ============================================================================
 
-// JJY 記錄檔的狀態（實作見下面的 jjyLogPoll()）
+// 授時碼記錄檔的狀態（實作見下面的 jjyLogPoll()）：JJY 寫 JJYLOG.TXT、BPC 寫 BPCLOG.TXT
 #define JJY_LOG_FILE "JJYLOG.TXT"
+#define BPC_LOG_FILE "BPCLOG.TXT"
+static const char *tcLogFile() { return tcSource() == TC_BPC ? BPC_LOG_FILE : JJY_LOG_FILE; }
 
 static bool     g_jlog_active, g_jlog_tried, g_jlog_ok;
 static uint32_t g_jlog_last_status, g_jlog_frames, g_jlog_lines;
@@ -665,16 +697,21 @@ static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
         snprintf(L[6], W, "SIGNAL NF %s dBFS  tune %s dBFS  S/N %s",
                  db10(a, sp->nf), db10(b, lv), db10(c, lv - sp->nf));
     }
-    snprintf(L[7], W, "JJY    span %d dB  sym %lu  frames %lu  err %d",
-             (int)(g_jjy.hi - g_jjy.lo), (unsigned long)g_jjy.symbols,
-             (unsigned long)g_jjy.frames, g_jjy.last_err);
+    if (tcSource() == TC_BPC)
+        snprintf(L[7], W, "BPC    span %d dB  sym %lu  frames %lu  err %d",
+                 (int)(g_bpc.hi - g_bpc.lo), (unsigned long)g_bpc.symbols,
+                 (unsigned long)g_bpc.frames, g_bpc.last_err);
+    else
+        snprintf(L[7], W, "JJY    span %d dB  sym %lu  frames %lu  err %d",
+                 (int)(g_jjy.hi - g_jjy.lo), (unsigned long)g_jjy.symbols,
+                 (unsigned long)g_jjy.frames, g_jjy.last_err);
     snprintf(L[8], W, "TX     %s", g_sdr.tx_on ? "on, GPIO 0, 68493 Hz" : "off");
     if (!g_jlog_active)
-        snprintf(L[9], W, "LOG    tune to JJY (40/60 kHz) to log to " JJY_LOG_FILE);
+        snprintf(L[9], W, "LOG    tune to JJY 40/60 or BPC 68.5 kHz to log");
     else if (!g_jlog_ok)
-        snprintf(L[9], W, "LOG    " JJY_LOG_FILE ": no SD card / write failed");
+        snprintf(L[9], W, "LOG    %s: no SD card / write failed", tcLogFile());
     else
-        snprintf(L[9], W, "LOG    " JJY_LOG_FILE "  %lu lines this session",
+        snprintf(L[9], W, "LOG    %s  %lu lines this session", tcLogFile(),
                  (unsigned long)g_jlog_lines);
     snprintf(L[10], W, "I = back to waterfall");
 }
@@ -937,11 +974,12 @@ static void presetSave()
 
 // 每圈一次：處理 sdr.c 送出來的 f／F 請求。
 // ============================================================================
-// JJY 記錄檔（SD 卡 JJYLOG.TXT）
+// 授時碼記錄檔（SD 卡 JJYLOG.TXT／BPCLOG.TXT）
 //
 // 實測都拔掉 USB（插著 S/N 會變差），看不到序列埠；解碼又要連續兩分鐘都成功
-// 才算鎖定，人不可能整晚盯著。所以調諧點在 JJY（40／60 kHz ±500 Hz，跟資訊列
-// 顯示解碼的條件相同）時自動記：每分鐘一行狀態、每解完一幀一行（格式見 jjy.h）。
+// 才算鎖定，人不可能整晚盯著。所以調諧點在 JJY（40／60 kHz ±500 Hz）或 BPC（68.5 kHz
+// ±500 Hz，跟資訊列顯示解碼的條件相同）時自動記：每分鐘一行狀態、每解完一幀一行
+// （格式見 jjy.h／bpc.h）。
 //
 // 每次都開檔、附加、關檔：掌機隨時可能被關掉，不留沒寫完的快取。一行幾 ms，
 // 一分鐘一兩次，偶爾掉一塊也無所謂。沒插卡只試一次，不會每分鐘卡 2 秒。
@@ -952,7 +990,7 @@ static void presetSave()
 static void jlogWrite(const char *line)
 {
     FsFile f;
-    if (!f.open(JJY_LOG_FILE, O_WRONLY | O_CREAT | O_APPEND)) {
+    if (!f.open(tcLogFile(), O_WRONLY | O_CREAT | O_APPEND)) {
         g_jlog_ok = false;
         return;
     }
@@ -965,7 +1003,8 @@ static void jlogWrite(const char *line)
 
 static void jjyLogPoll()
 {
-    bool want = g_sdr.tc[0] != 0;          // updateTimecodeLine() 只在 JJY 上才填
+    bool want = g_sdr.tc[0] != 0;          // updateTimecodeLine() 只在 JJY／BPC 上才填
+    bool is_bpc = tcSource() == TC_BPC;
     uint32_t now = millis();
     char line[200];
 
@@ -997,24 +1036,33 @@ static void jjyLogPoll()
                  g_sdr.bw_hz);
         jlogWrite(line);
         g_jlog_last_status = now;
-        g_jlog_frames = g_jjy.frames;
+        g_jlog_frames = is_bpc ? g_bpc.frames : g_jjy.frames;
     }
     if (!g_jlog_ok)
         return;
 
-    // 換台時 jjy_init() 會把 frames 歸零
-    if (g_jjy.frames < g_jlog_frames)
-        g_jlog_frames = g_jjy.frames;
-    if (g_jjy.frames != g_jlog_frames) {
-        g_jlog_frames = g_jjy.frames;
-        jjy_log_frame(&g_jjy, now / 1000, g_sdr.tune_hz, tuneLevel(), g_sdr.sp.nf,
-                      line, sizeof line);
+    // 換台時 jjy_init()／bpc_init() 會把 frames 歸零
+    uint32_t frames = is_bpc ? g_bpc.frames : g_jjy.frames;
+    if (frames < g_jlog_frames)
+        g_jlog_frames = frames;
+    if (frames != g_jlog_frames) {
+        g_jlog_frames = frames;
+        if (is_bpc)
+            bpc_log_frame(&g_bpc, now / 1000, g_sdr.tune_hz, tuneLevel(), g_sdr.sp.nf,
+                          line, sizeof line);
+        else
+            jjy_log_frame(&g_jjy, now / 1000, g_sdr.tune_hz, tuneLevel(), g_sdr.sp.nf,
+                          line, sizeof line);
         jlogWrite(line);
     }
     if (now - g_jlog_last_status >= 60000) {
         g_jlog_last_status = now;
-        jjy_log_status(&g_jjy, now / 1000, g_sdr.tune_hz, tuneLevel(), g_sdr.sp.nf,
-                       line, sizeof line);
+        if (is_bpc)
+            bpc_log_status(&g_bpc, now / 1000, g_sdr.tune_hz, tuneLevel(), g_sdr.sp.nf,
+                           line, sizeof line);
+        else
+            jjy_log_status(&g_jjy, now / 1000, g_sdr.tune_hz, tuneLevel(), g_sdr.sp.nf,
+                           line, sizeof line);
         jlogWrite(line);
     }
 }
@@ -1184,7 +1232,11 @@ void loop()
                           lv / 10, abs(lv % 10), (lv - sp->nf) / 10, abs((lv - sp->nf) % 10),
                           sp->bin_db[b3] / 10, abs(sp->bin_db[b3] % 10), g_sdr.tx_on);
         }
-        if (g_sdr.tc[0])
+        if (g_sdr.tc[0] && tcSource() == TC_BPC)
+            Serial.printf("    %s | span %d dB, sym %lu, frames %lu, err %d\n", g_sdr.tc,
+                          (int)(g_bpc.hi - g_bpc.lo), (unsigned long)g_bpc.symbols,
+                          (unsigned long)g_bpc.frames, g_bpc.last_err);
+        else if (g_sdr.tc[0])
             Serial.printf("    %s | span %d dB, sym %lu, frames %lu, err %d\n", g_sdr.tc,
                           (int)(g_jjy.hi - g_jjy.lo), (unsigned long)g_jjy.symbols,
                           (unsigned long)g_jjy.frames, g_jjy.last_err);

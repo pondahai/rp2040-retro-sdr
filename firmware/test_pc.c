@@ -18,6 +18,7 @@
 
 #include "ddc.h"
 #include "eq.h"
+#include "bpc.h"
 #include "font5x7.h"
 #include "jjy.h"
 #include "sdr.h"
@@ -133,6 +134,25 @@ static void type(sdr *s, const char *str)
 /* ---- 測試 ---------------------------------------------------------------- */
 
 static sdr g_s;                       /* 140 KB 左右，別放在堆疊上 */
+
+/* BPC 測試用：從 2026-10-10（週六）22:49:00 起的第 k 幀（每幀 20 秒） */
+static void bpc_frame(int k, uint8_t sym[20], bpc_time *out)
+{
+    int32_t s = 22 * 3600 + 49 * 60 + 20 * k;
+    bpc_time t = { 26, 10, 10, 6, (int)(s / 3600 % 24), (int)(s / 60 % 60), (int)(s % 60) };
+    bpc_encode(&t, sym);
+    if (out) *out = t;
+}
+
+/* 第 t 秒（從 22:49:00 起）那一刻，載波是不是降下來的 */
+static int bpc_low_at(double t)
+{
+    uint8_t f[20];
+    int k = (int)(t / 20), sec = (int)t % 20;
+    bpc_frame(k, f, NULL);
+    double in_sec = fmod(t, 1.0);
+    return f[sec] != BPC_M && in_sec < 0.1 * (f[sec] + 1);
+}
 
 static double meter_run(sdr *s, int mode, int bw, const tone *t, int nt)
 {
@@ -765,6 +785,109 @@ int main(void)
             seen |= strstr(s->text[i].s, "BAND ") != NULL;
         CHECK(seen && s->meter_px >= 0 && s->meter_px <= UI_W - 8,
               "BAND on the info line, bar %d px", s->meter_px);
+    }
+
+    printf("[14] BPC frame format\n");
+    {
+        uint8_t f[20];
+        bpc_time t = { 26, 10, 10, 6, 22, 49, 40 }, u;
+        bpc_encode(&t, f);
+        /* 手算：P1 = 2（第 40 秒），10 點 = 2·4+2 -> P3 2 P4 2，49 分 = 3·16+0·4+1，
+         * 週六 6 = 1·4+2，下午 + P1–P9 的 1 位元數（1+1+1+2+0+1+1+1 = 8，偶）-> P10 = 2 */
+        static const uint8_t want[20] = { BPC_M, 2, 0, 2, 2, 3, 0, 1, 1, 2, 2,
+                                          0, 2, 2, 2, 2, 1, 2, 2, 0 };
+        /* 日 10 = 0·16+2·4+2，月 10 = 2·4+2，年 26 = 1·16+2·4+2；
+         * P11–P18 的 1 位元數 = 0+1+1+1+1+1+1+1 = 7（奇）-> P19 低位 1 */
+        uint8_t w2[20];
+        memcpy(w2, want, 20);
+        w2[19] = 1;
+        CHECK(!memcmp(f, w2, 20), "encode matches the hand-worked frame");
+        CHECK(bpc_decode(f, &u) == 0 && u.hour == 22 && u.min == 49 && u.sec == 40 &&
+              u.day == 10 && u.month == 10 && u.year == 26 && u.wday == 6,
+              "decode -> %02d:%02d:%02d %d-%02d-%02d wday %d", u.hour, u.min, u.sec,
+              2000 + u.year, u.month, u.day, u.wday);
+        uint8_t g[20];
+        memcpy(g, f, 20); g[6] ^= 1;
+        CHECK(bpc_decode(g, &u) == BPC_E_PARITY, "flipped bit in minute -> parity error");
+        memcpy(g, f, 20); g[17] ^= 2;
+        CHECK(bpc_decode(g, &u) == BPC_E_PARITY, "flipped bit in year -> parity error");
+        memcpy(g, f, 20); g[0] = 0;
+        CHECK(bpc_decode(g, &u) == BPC_E_MARKER, "no P0 marker -> marker error");
+        memcpy(g, f, 20); g[12] = BPC_ERR;
+        CHECK(bpc_decode(g, &u) == BPC_E_SYMBOL, "unreadable symbol -> symbol error");
+        bpc_time m = { 26, 13, 10, 6, 9, 5, 0 };     /* 13 月：同位對但範圍錯 */
+        bpc_encode(&m, g);
+        CHECK(bpc_decode(g, &u) == BPC_E_RANGE, "month 13 -> range error");
+        bpc_time am = { 26, 10, 10, 6, 9, 5, 0 };
+        bpc_encode(&am, g);
+        CHECK(bpc_decode(g, &u) == 0 && u.hour == 9, "morning hour stays 9 (%d)", u.hour);
+    }
+
+    printf("[15] BPC from a noisy envelope\n");
+    {
+        /* 同 [8]：高 1.0、低 0.1（-10 dB，BPC 降到 10%），衰落、雜訊、鍵盤掃描的空檔。
+         * 起點在 22:49:07.3（幀中間），收約 75 秒 */
+        static bpc b;
+        bpc_init(&b);
+        double t_ms = 7300.0, blk = 0;
+        int locked_at = -1;
+        while (t_ms < 80000.0) {
+            double p = bpc_low_at(t_ms / 1000.0) ? 0.1 : 1.0;
+            double fade = 0.5 + 0.4 * sin(t_ms / 9000.0);
+            double noise = -log(urand()) * 0.004;
+            bpc_push(&b, (float)(p * fade + noise), (uint32_t)t_ms);
+            if (bpc_locked(&b) && locked_at < 0)
+                locked_at = (int)(t_ms / 1000);
+            t_ms += 8.192;
+            blk += 8.192;
+            if (blk >= 65.5) { blk = 0; t_ms += 2.0; }
+        }
+        printf("        symbols %lu, frames %lu, last err %d, history: %.40s\n",
+               (unsigned long)b.symbols, (unsigned long)b.frames, b.last_err, b.hist + 20);
+        CHECK(bpc_locked(&b) && b.t.hour == 22 && b.t.min == 50 && b.t.sec == 0,
+              "locked, last decoded 22:%02d:%02d (want 22:50:00), locked at t=%d s",
+              b.t.min, b.t.sec, locked_at);
+        CHECK(labs((long)b.t_ms - 60000L) < 60, "frame timestamp %lu ms (want 60000)",
+              (unsigned long)b.t_ms);
+    }
+
+    printf("[16] BPC end to end: 68.5 kHz carrier -> DDC -> decoder\n");
+    {
+        static ddc d;
+        static bpc b;
+        static int16_t audio[1024 + DDC_FILL_MAX];
+        ddc_init(&d);
+        ddc_set(&d, 68500, DDC_CW, 500);
+        bpc_init(&b);
+        const int GAP = 480;
+        const double PI2 = 2 * 3.14159265358979323846;
+        double t = 12.0;                         /* 22:49:12 開始 */
+        while (t < 62.0) {                       /* 收到 22:49:40 那一幀結束 */
+            t += (double)GAP / SP_FS;
+            for (int i = 0; i < SDR_BLOCK; i++, t += 1.0 / SP_FS) {
+                double a = bpc_low_at(t) ? 1.9 : 6.0;       /* 6 LSB，降到 10% 功率 ≈ 0.32 振幅 */
+                double v = 508.0 + 2.0 * grand() + a * sin(PI2 * 68500.0 * t);
+                if (i < SDR_SKIP)
+                    v -= 508.0 * exp(-i / 20.5);
+                long q = lround(v);
+                g_block[i] = (uint16_t)(q < 0 ? 0 : q > 4095 ? 4095 : q);
+            }
+            ddc_block(&d, g_block, SDR_BLOCK, SDR_SKIP, GAP, audio,
+                      (int)(sizeof audio / sizeof audio[0]));
+            for (int k = 0; k < d.env_n; k++)
+                bpc_push(&b, d.env[k], d.env_ms[k] + 12000u);
+        }
+        printf("        symbols %lu, frames %lu, last err %d, history: %.40s\n",
+               (unsigned long)b.symbols, (unsigned long)b.frames, b.last_err, b.hist + 20);
+        CHECK(bpc_locked(&b) && b.t.min == 49 && b.t.sec == 40,
+              "6 LSB carrier in 2 LSB noise: locked on 22:49:%02d (want 22:49:40)", b.t.sec);
+        CHECK(labs((long)b.t_ms - 40000L) < 60, "frame timestamp %lu ms (want 40000)",
+              (unsigned long)b.t_ms);
+        char line[200];
+        bpc_log_frame(&b, 3725, 68500, -632, -771, line, sizeof line);
+        printf("        %.90s\n", line);
+        CHECK(strstr(line, " cst=22:49:40 date=2026-10-10 wday=6 sym=M") != NULL,
+              "frame log line has CST, date and the 20 symbols");
     }
 
     write_glyphs("glyphs.ppm");
