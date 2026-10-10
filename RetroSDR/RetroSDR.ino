@@ -419,9 +419,10 @@ static void render()
 // Core 0 每抓完一塊就把緩衝區編號丟進跨核 FIFO。那一塊要等下一塊抓完（65 ms
 // 之後）才會被 DMA 覆寫，Core 1 只要在那之前做完就好 —— 實測見序列埠的 ddc。
 //
-// 音訊的產出是一陣一陣的（每 66.5 ms 一次 1008 個），播放是等速的。塊與塊
-// 之間有鍵盤掃描的空隙，產出率比 15625 Hz 略低約 1.6%，所以播放間隔會依
-// 環形緩衝的水位在 63/64/68 µs 之間微調，不讓它見底也不讓它溢出。
+// 音訊的產出是一陣一陣的（每 66.5 ms 一次約 1039 個），播放是等速的 64 µs。
+// 塊與塊之間鍵盤掃描的空檔由 DDC 補上樣本（ddc.h），所以產出平均剛好是
+// 15625 Hz；ADC（PLL_USB）和播放計時（clk_sys）來自同一顆石英，兩邊不會
+// 越差越多。以前是按水位在 63/64/68 µs 之間換速度追產出，音高跟著 ±3% 飄。
 // （音訊取樣率原本是 7812.5 Hz、128 µs，見 ddc.h 為什麼改成兩倍。）
 // ============================================================================
 
@@ -442,32 +443,48 @@ static volatile bool     g_core0_ready;
 static int16_t           g_aud[AUD_N];
 static volatile uint32_t g_aud_w, g_aud_r; // 只增不減，相減就是水位
 static volatile uint32_t g_aud_under;      // 播放時沒東西可播的次數
+static volatile uint32_t g_aud_slip;       // 水位跑太遠，丟一個或重複一個的次數
 static volatile uint32_t g_ddc_us;         // Core 1 處理一塊花多久
 
 static uint s_pwm_slice, s_pwm_chan;
 
+// 水位要撐得住兩次產出之間的 66.5 ms（約 1039 個）。開播前先存到 AUD_START，
+// 之後只要速率對得上，水位就停在那附近上下一塊。gap 是 µs 換算的，可能有
+// 一點點偏差，水位慢慢漂出 [AUD_LOW, AUD_HIGH] 時才丟／重複一個樣本，聽不出來。
+#define AUD_START 1536
+#define AUD_LOW   256
+#define AUD_HIGH  3328
+
 static int64_t audioTick(alarm_id_t, void *)
 {
+    static bool playing;
     uint32_t fill = g_aud_w - g_aud_r;
     int level = PWM_MID;
-    if (fill) {
+    if (!playing && fill >= AUD_START)
+        playing = true;
+    if (playing && fill) {
         int32_t v = g_aud[g_aud_r & (AUD_N - 1)];
-        g_aud_r = g_aud_r + 1;
+        if (fill > AUD_HIGH) {              // 太滿：多吃一個
+            g_aud_r = g_aud_r + 2;
+            g_aud_slip = g_aud_slip + 1;
+        } else if (fill < AUD_LOW) {        // 太空：這個樣本播兩次
+            static bool held;
+            held = !held;
+            if (!held)
+                g_aud_r = g_aud_r + 1;
+            else
+                g_aud_slip = g_aud_slip + 1;
+        } else {
+            g_aud_r = g_aud_r + 1;
+        }
         // ±32767 × 音量 -> ±(PWM_MID-1)
         level += (int)(v * g_vol * (PWM_MID - 1) / (32767 * SDR_VOL_MAX));
-    } else {
+    } else if (playing) {
         g_aud_under = g_aud_under + 1;
+        playing = false;                    // 見底了：重新存到 AUD_START 再播
     }
     pwm_set_chan_level(s_pwm_slice, s_pwm_chan, (uint16_t)level);
-
-    // 負值 = 以上一次的預定時間為準再過這麼久（不累積誤差）
-    //
-    // 水位要停在一塊（1008）以上：產出是每 66.5 ms 一次倒進 1008 個，兩次之間
-    // 要撐得住。7812.5 Hz 時第一版門檻設在半塊，上機實測每秒見底約 56 次
-    // （喀喀聲）。停在 1536 附近 = 約 0.1 s 的延遲，換來不斷音。
-    if (fill < 1536) return -68;           // 14706 Hz，明顯比產出（約 15160）慢 -> 回升
-    if (fill > 2560) return -63;           // 15873 Hz，比產出快 -> 水位下降
-    return -64;
+    return -64;                             // 負值 = 以上一次的預定時間為準（不累積誤差）
 }
 
 static void audioBegin()
@@ -497,7 +514,7 @@ void setup1()
 void loop1()
 {
     static uint32_t seq_applied;
-    static int16_t out[SDR_BLOCK / DDC_DECIM];
+    static int16_t out[SDR_BLOCK / DDC_DECIM + DDC_FILL_MAX];
     uint32_t idx;
 
     if (!rp2040.fifo.pop_nb(&idx))
@@ -625,8 +642,9 @@ static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
     snprintf(L[3], W, "CORE1  ddc %lu ms of 65  (fir %lu  cic %lu)",
              (unsigned long)(g_ddc_us / 1000), (unsigned long)(g_ddc.t_post / 1000),
              (unsigned long)((g_ddc.t_total - g_ddc.t_post) / 1000));
-    snprintf(L[4], W, "AUDIO  fill %lu  underruns %lu  vol %d",
-             (unsigned long)(g_aud_w - g_aud_r), (unsigned long)g_aud_under, g_sdr.vol);
+    snprintf(L[4], W, "AUDIO  fill %lu  under %lu  slip %lu  vol %d",
+             (unsigned long)(g_aud_w - g_aud_r), (unsigned long)g_aud_under,
+             (unsigned long)g_aud_slip, g_sdr.vol);
     snprintf(L[5], W, "CLOCK  sys %lu MHz  peri %lu MHz  spi %lu.%lu MHz",
              (unsigned long)(clock_get_hz(clk_sys) / 1000000),
              (unsigned long)(clock_get_hz(clk_peri) / 1000000),
@@ -1077,7 +1095,7 @@ void loop()
     {
         static uint32_t gap_before_done;
         rp2040.fifo.push_nb((uint32_t)done | (gap_before_done << 1));
-        gap_before_done = g_sdr.scan_us / 2;
+        gap_before_done = (g_sdr.scan_us + 1) / 2;   // µs -> 點數，四捨五入
     }
 
     // 按鍵
@@ -1162,7 +1180,8 @@ void loop()
                       "audio fill %lu, underruns %lu\n",
                       (unsigned long)g_ddc_us, (unsigned long)g_ddc.t_post,
                       (unsigned long)(g_ddc.t_total - g_ddc.t_post),
-                      (unsigned long)(g_aud_w - g_aud_r), (unsigned long)g_aud_under);
+                      (unsigned long)(g_aud_w - g_aud_r), (unsigned long)g_aud_under,
+                      (unsigned long)g_aud_slip);
         Serial.printf("    draw: prep %lu us, ui_line %lu us, spi wait %lu us | "
                       "clk_peri %lu MHz, spi0 %lu Hz\n",
                       (unsigned long)g_t_prep, (unsigned long)g_t_line,

@@ -410,6 +410,18 @@ int main(void)
               purity[0]);
         printf("        (same without gap compensation: %.1f dB)\n", purity[1]);
         CHECK(purity[0] > purity[1] + 3, "gap compensation makes a difference");
+
+        /* 空檔有補樣本：產出平均要剛好是 15625 Hz，播放端才能固定 64 µs 播 */
+        ddc_init(&d);
+        long total = 0;
+        for (int blk = 0; blk < 20; blk++) {
+            synth(508.0, 2.0, &t, 1);
+            total += ddc_block(&d, g_block, SDR_BLOCK, SDR_SKIP, GAP, audio,
+                               (int)(sizeof audio / sizeof audio[0]));
+        }
+        long want = 20L * (SDR_BLOCK + GAP) / DDC_DECIM;
+        CHECK(labs(total - want) <= 1, "20 blocks with gap: %ld audio samples (want %ld = 15625 Hz)",
+              total, want);
     }
 
     printf("[7] JJY frame format\n");

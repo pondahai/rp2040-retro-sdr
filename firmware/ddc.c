@@ -195,6 +195,15 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
     uint32_t ph = d->lo_phase + (uint32_t)(gap + skip) * st;
     d->t_samples += (uint64_t)(gap + skip);
     d->env_n = 0;
+
+    /* 空檔換算成音訊樣本數，先在 out 開頭佔位，整塊做完再內插填上 */
+    d->gap_acc += (uint32_t)(gap + skip);
+    int fill = (int)(d->gap_acc / DDC_DECIM);
+    d->gap_acc %= DDC_DECIM;
+    if (fill > DDC_FILL_MAX) fill = DDC_FILL_MAX;
+    if (fill > max) fill = max;
+    d->bfo_phase += (uint32_t)fill * d->bfo_step;
+    produced = fill;
     uint32_t i0 = d->integ_a[0][0], i1 = d->integ_a[0][1], i2 = d->integ_a[0][2];
     uint32_t q0 = d->integ_a[1][0], q1 = d->integ_a[1][1], q2 = d->integ_a[1][2];
     int dec_a = d->dec_a;
@@ -324,6 +333,14 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
             out[produced++] = (int16_t)o;
         t_post += now_us() - tp;
     }
+
+    if (fill) {
+        int32_t a = d->last_out, b = produced > fill ? out[fill] : a;
+        for (int k = 0; k < fill; k++)
+            out[k] = (int16_t)(a + (b - a) * (k + 1) / (fill + 1));
+    }
+    if (produced)
+        d->last_out = out[produced - 1];
 
     d->lo_phase = ph;
     d->t_samples = t_base + (uint64_t)n;

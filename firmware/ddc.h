@@ -33,6 +33,8 @@
 
 #define DDC_FS      500000
 #define DDC_DECIM   32
+/* 空檔補音訊樣本，一塊最多補幾個（64 = 4 ms）。比這長的空檔不是正常的鍵盤掃描，補了也沒意義。 */
+#define DDC_FILL_MAX 64
 #define DDC_AFS_X2  31250               /* 音訊取樣率 × 2 = 15625 Hz × 2 */
 #define DDC_TAPS    127
 #define DDC_ENV_DECIM 128               /* 15625 / 128 ≈ 122 Hz，每 8.2 ms 一點 */
@@ -84,6 +86,10 @@ typedef struct {
 
     /* 上一塊的耗時（µs）：整塊、其中 FIR＋解調的部分。ddc_clock_us 沒設就是 0。 */
     uint32_t t_total, t_post;
+
+    /* 空檔補樣本：還沒補滿一個音訊樣本的輸入點數、上一塊最後一個輸出 */
+    uint32_t gap_acc;
+    int16_t  last_out;
 } ddc;
 
 /* 量時間用的時鐘，同 spectrum.h 的 sp_clock_us。 */
@@ -102,7 +108,12 @@ void ddc_set(ddc *d, int32_t tune_hz, int mode, int bw_hz);
  *       M2 第一次上機就是這樣。
  * gap： 上一塊結束到這一塊 x[0] 之間，真實時間過了幾個取樣點（鍵盤掃描的
  *       空檔）。本振的相位會補上 gap + skip，載波在塊與塊之間才接得起來；
- *       不補的話每塊都有一次相位跳躍，CW 嗶聲會喀喀響。 */
+ *       不補的話每塊都有一次相位跳躍，CW 嗶聲會喀喀響。
+ *
+ * gap + skip 這段沒有樣本的真實時間，也會在 out 開頭補上對應數量的音訊
+ * 樣本（前後線性內插，最多 DDC_FILL_MAX 個）。這樣輸出平均剛好是
+ * DDC_AFS_X2/2 = 15625 Hz，播放端可以用固定速率播，不必靠變速追水位
+ * （變速 ±3% 就是上機聽到的音高忽高忽低）。BFO 相位也跟著走過去。 */
 int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
               int16_t *out, int max);
 
