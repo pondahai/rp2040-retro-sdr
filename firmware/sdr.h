@@ -11,6 +11,7 @@
 
 #include "ddc.h"
 #include "keys.h"
+#include "preset.h"
 #include "spectrum.h"
 #include "wfall.h"
 
@@ -70,6 +71,15 @@ typedef struct {
     int  rec_on;                      /* 1 = 錄音中（鍵盤 R 切換；平台開檔失敗會清回 0） */
     char rec[UI_TEXT_COLS + 1];       /* 錄音狀態列，平台填；空字串 = 不顯示 */
 
+    /* 預設清單（鍵盤 f 選台、F 存台）。按鍵只送出請求：平台第一次要先從
+     * SD 卡讀 PRESETS.TXT，存台要寫檔，這些都不在這裡做。 */
+    preset_list presets;
+    int  preset_idx;                  /* 目前在第幾個，-1 = 還沒選過 */
+    int  preset_req;                  /* 1 = 按了 f，平台讀好清單後呼叫 sdr_preset_next() */
+    int  preset_save_req;             /* 1 = 按了 F，平台寫檔後呼叫 preset_add() 與 sdr_msg() */
+    char msg[UI_TEXT_COLS + 1];       /* 短暫的訊息（選台、存台），幾秒後消失 */
+    int  msg_ttl;                     /* 還要顯示幾次重畫 */
+
     char entry[12];                   /* 頻率輸入中（kHz） */
     int  entry_len;
     int  entering;
@@ -107,6 +117,15 @@ void ui_line(const sdr *s, int y, uint16_t *out);
 
 /* 調諧點所在的 bin。 */
 int sdr_cursor_bin(const sdr *s);
+
+/* 切到清單的下一個台（調諧點、模式、頻寬），並顯示訊息。 */
+void sdr_preset_next(sdr *s);
+
+/* 在資訊列顯示一段訊息約 3 秒。 */
+void sdr_msg(sdr *s, const char *text);
+
+/* 目前的調諧點、模式、頻寬，當成一個預設（存台用；名稱留空）。 */
+void sdr_current_preset(const sdr *s, preset *out);
 
 /* 設調諧點（會夾在 0..fs/2 內，並更新游標像素、標記 ddc_dirty）。 */
 void sdr_tune(sdr *s, int32_t hz);

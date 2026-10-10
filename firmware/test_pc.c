@@ -20,6 +20,7 @@
 #include "font5x7.h"
 #include "jjy.h"
 #include "sdr.h"
+#include "preset.h"
 #include "wav.h"
 
 static int g_fail;
@@ -574,6 +575,79 @@ int main(void)
               (unsigned long)LE32(4), (unsigned long)LE32(40));
         CHECK(LE16(20) == 1 && LE16(22) == 1 && LE32(24) == 500000 && LE32(28) == 1000000 &&
               LE16(32) == 2 && LE16(34) == 16, "PCM mono 16-bit 500 kHz");
+    }
+
+    printf("[11] presets: parse, format, f / F keys\n");
+    {
+        preset p;
+        CHECK(preset_parse("40.000 CW 500 JJY Fukushima\r\n", &p) && p.hz == 40000 &&
+              p.mode == DDC_CW && p.bw_hz == 500 && !strcmp(p.name, "JJY Fukushima"),
+              "full line (hz %ld, mode %d, bw %d, name '%s')", (long)p.hz, p.mode, p.bw_hz, p.name);
+        CHECK(preset_parse("  68.5 cw BPC", &p) && p.hz == 68500 && p.bw_hz == ddc_default_bw(DDC_CW) &&
+              !strcmp(p.name, "BPC"), "no bandwidth, lower-case mode -> default bw (%d)", p.bw_hz);
+        CHECK(preset_parse("26 AM 7000 alias", &p) && p.bw_hz == ddc_default_bw(DDC_AM),
+              "bandwidth not in the AM table -> default (%d)", p.bw_hz);
+        CHECK(preset_parse("26.000 AM 8000 1026 kHz alias", &p) && p.bw_hz == 8000 &&
+              !strcmp(p.name, "1026 kHz alias"), "name may start with a digit after bw ('%s')", p.name);
+        CHECK(preset_parse("123.456 LSB", &p) && p.hz == 123456 && p.mode == DDC_LSB && !p.name[0],
+              "no name");
+        CHECK(!preset_parse("# comment", &p) && !preset_parse("   ", &p) && !preset_parse("", &p),
+              "comment and blank lines are skipped");
+        CHECK(!preset_parse("300 AM", &p) && !preset_parse("40.0001 CW", &p) &&
+              !preset_parse("40 FM", &p) && !preset_parse("abc CW", &p) && !preset_parse("40x CW", &p),
+              "out of range, 4 decimals, unknown mode, garbage are rejected");
+
+        char line[64];
+        preset q = { 59998, DDC_USB, 2700, "maybe JJY" }, r;
+        preset_format(&q, line, sizeof line);
+        CHECK(!strcmp(line, "59.998 USB 2700 maybe JJY"), "format: '%s'", line);
+        CHECK(preset_parse(line, &r) && r.hz == q.hz && r.mode == q.mode && r.bw_hz == q.bw_hz &&
+              !strcmp(r.name, q.name), "format -> parse round trip");
+
+        sdr_init(s);
+        int nb = s->presets.n;
+        CHECK(nb == s->presets.n_builtin && nb >= 3, "%d built-in presets", nb);
+        press(s, 'f');
+        CHECK(s->preset_req && s->tune_hz == 68500, "f only raises a request (platform loads SD first)");
+        s->preset_req = 0;
+        s->ddc_dirty = 0;
+        sdr_preset_next(s);
+        CHECK(s->tune_hz == 40000 && s->mode == DDC_CW && s->ddc_dirty && s->msg_ttl > 0 &&
+              strstr(s->msg, "PRESET 1/"), "first preset: JJY 40 ('%s')", s->msg);
+        for (int i = 1; i < nb; i++)
+            sdr_preset_next(s);
+        sdr_preset_next(s);
+        CHECK(s->preset_idx == 0 && s->tune_hz == 40000, "wraps around after the last one");
+
+        sdr_tune(s, 26000);
+        s->mode = DDC_AM;
+        s->bw_hz = 8000;
+        press(s, 'F');
+        CHECK(s->preset_save_req, "F raises a save request");
+        sdr_current_preset(s, &q);
+        CHECK(preset_add(&s->presets, &q) && s->presets.n == nb + 1, "added (n %d)", s->presets.n);
+        CHECK(preset_add(&s->presets, &q) && s->presets.n == nb + 1, "same freq + mode is not added twice");
+        for (int i = s->presets.n; i < PRESET_MAX; i++) {
+            q.hz = 100000 + i;
+            preset_add(&s->presets, &q);
+        }
+        q.hz = 200000;
+        CHECK(!preset_add(&s->presets, &q) && s->presets.n == PRESET_MAX, "full list refuses (n %d)",
+              s->presets.n);
+
+        sdr_msg(s, "SAVED 26.000 AM");
+        strcpy(s->rec, "REC003.WAV 2 s");
+        sdr_prepare(s);
+        int seen = 0;
+        for (int i = 0; i < s->ntext; i++)
+            seen |= strstr(s->text[i].s, "SAVED 26.000") ? 1 : strstr(s->text[i].s, "REC003") ? 2 : 0;
+        CHECK(seen == 1, "message wins over the recording line while it lasts (seen %d)", seen);
+        s->msg_ttl = 0;
+        sdr_prepare(s);
+        seen = 0;
+        for (int i = 0; i < s->ntext; i++)
+            seen |= strstr(s->text[i].s, "REC003") ? 2 : 0;
+        CHECK(seen == 2, "then the recording line comes back");
     }
 
     write_glyphs("glyphs.ppm");

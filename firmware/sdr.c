@@ -38,6 +38,46 @@ void sdr_init(sdr *s)
     s->range_db = 80;
     s->avg = 2;
     s->peak_on = 1;
+    preset_init(&s->presets);
+    s->preset_idx = -1;
+}
+
+/* 訊息顯示幾次重畫：平常每塊一次（66.5 ms），45 次約 3 秒 */
+#define SDR_MSG_TTL 45
+
+void sdr_msg(sdr *s, const char *text)
+{
+    /* 超出一行的部分截掉（不用 snprintf：gcc 會對刻意的截斷發警告） */
+    size_t n = strlen(text);
+    if (n > sizeof s->msg - 1)
+        n = sizeof s->msg - 1;
+    memcpy(s->msg, text, n);
+    s->msg[n] = 0;
+    s->msg_ttl = SDR_MSG_TTL;
+}
+
+void sdr_preset_next(sdr *s)
+{
+    preset_list *l = &s->presets;
+    if (l->n <= 0)
+        return;
+    s->preset_idx = (s->preset_idx + 1) % l->n;
+    const preset *p = &l->p[s->preset_idx];
+    s->mode = p->mode;
+    s->bw_hz = p->bw_hz;
+    sdr_tune(s, p->hz);               /* 也會標記 ddc_dirty */
+    char lab[48], b[UI_TEXT_COLS + 1 + 48];  /* 過長的部分由 sdr_msg 截掉 */
+    preset_label(p, lab, sizeof lab);
+    snprintf(b, sizeof b, "PRESET %d/%d  %s", s->preset_idx + 1, l->n, lab);
+    sdr_msg(s, b);
+}
+
+void sdr_current_preset(const sdr *s, preset *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->hz = s->tune_hz;
+    out->mode = s->mode;
+    out->bw_hz = s->bw_hz;
 }
 
 int sdr_k(const sdr *s)
@@ -144,6 +184,7 @@ int sdr_key(sdr *s, const key_event *ev)
     /* 大寫 H / L 是大步（Shift），其餘指令不分大小寫（CapsLock 開著也能用） */
     if (c == 'H') { sdr_tune(s, s->tune_hz - 10 * s->step_hz); return 1; }
     if (c == 'L') { sdr_tune(s, s->tune_hz + 10 * s->step_hz); return 1; }
+    if (c == 'F') { s->preset_save_req = 1; return 1; }
     if (c >= 'A' && c <= 'Z')
         c = (uint8_t)(c - 'A' + 'a');
 
@@ -204,6 +245,9 @@ int sdr_key(sdr *s, const key_event *ev)
         return 1;
     case 'r':
         s->rec_on = !s->rec_on;
+        return 1;
+    case 'f':
+        s->preset_req = 1;
         return 1;
     }
     return 0;
@@ -315,6 +359,10 @@ void sdr_prepare(sdr *s)
     if (s->entering) {
         sprintf(b, "FREQ> %s_ kHz    ENTER=GO  ESC=CANCEL", s->entry);
         text(s, 4, UI_Y_INFO + 18, C_AMBER, b);
+    } else if (s->msg_ttl > 0) {
+        /* 選台、存台的訊息：幾秒就消失，所以比錄音狀態還優先 */
+        text(s, 4, UI_Y_INFO + 18, C_AMBER, s->msg);
+        s->msg_ttl--;
     } else if (s->rec[0]) {
         /* 錄音中（或剛停）：檔名、秒數、掉塊 —— 比授時碼優先 */
         text(s, 4, UI_Y_INFO + 18, s->rec_on ? C_RED : C_AMBER, s->rec);
@@ -338,5 +386,5 @@ void sdr_prepare(sdr *s)
     text(s, 4, UI_Y_HINT + 1, C_DIM,
          "PAD <>TUNE ^vREF  A/B VOL  SEL MODE  START STEP");
     text(s, 4, UI_Y_HINT + 9, C_DIM,
-         "KBD 0-9.ENTER FREQ M B S -/= VOL [ ] A P Q T I R");
+         "KBD 0-9.ENTER FREQ M B S -/= VOL [ ] A P Q T I R F");
 }

@@ -44,6 +44,7 @@ extern "C" {
 #include "src/rs_sdr.h"
 #include "src/rs_jjy.h"
 #include "src/rs_wav.h"
+#include "src/rs_preset.h"
 }
 
 // ---- 顯示器（spi0）----
@@ -684,18 +685,25 @@ static void recFail(const char *why)
 // 各自完整，但第 1、2 塊之間空了約 0.4 s（REC000／REC001 都是）。
 // 現在開檔那一圈的那塊不寫，下一圈那塊（開檔期間抓的、後面接不上）也丟掉，
 // 從第三圈起寫，檔案從第一塊就是連續的。
-static void recStart()
+// 第一次用到 SD 卡（錄音或預設清單）才初始化。沒插卡時 SdFat 要逾時約 2 秒，
+// 那幾塊會掉 —— 所以不在開機時做，也不在背景重試。
+static bool sdBegin()
 {
-    uint32_t t_open = time_us_32();
     if (!g_sd_ok) {
         SPI1.setRX(PIN_SD_MISO);
         SPI1.setTX(PIN_SD_MOSI);
         SPI1.setSCK(PIN_SD_SCK);
         g_sd_ok = g_sd.begin(SdSpiConfig(PIN_SD_CS, DEDICATED_SPI, SD_SCK_MHZ(REC_SD_MHZ), &SPI1));
-        if (!g_sd_ok) {
-            recFail("NO SD CARD");
-            return;
-        }
+    }
+    return g_sd_ok;
+}
+
+static void recStart()
+{
+    uint32_t t_open = time_us_32();
+    if (!sdBegin()) {
+        recFail("NO SD CARD");
+        return;
     }
     int i;
     for (i = 0; i < 1000; i++) {
@@ -810,6 +818,96 @@ static void recBlock(const uint16_t *x, uint32_t t_start)
         recStop();
 }
 
+// ============================================================================
+// M4：預設清單（鍵盤 f 選台、F 存台）
+//
+// 解析與格式在 firmware/preset.c；這裡只管檔案。PRESETS.TXT 放在 SD 卡根目錄，
+// 第一次按 f 才讀（只試一次：沒插卡就只用內建的，不會每按一次就卡 2 秒）。
+// F 把目前的頻率／模式／頻寬加到清單，並附加一行到檔尾；沒卡就只存在 RAM。
+// ============================================================================
+
+#define PRESET_FILE "PRESETS.TXT"
+
+static bool g_presets_loaded;
+
+static void presetLoad()
+{
+    g_presets_loaded = true;
+    if (!sdBegin()) {
+        Serial.println("presets: no SD card, built-in only");
+        return;
+    }
+    FsFile f;
+    if (!f.open(PRESET_FILE, O_RDONLY)) {
+        Serial.println("presets: " PRESET_FILE " not found, built-in only");
+        return;
+    }
+    char line[96];
+    int got = 0, bad = 0;
+    while (f.fgets(line, sizeof line) > 0) {
+        preset p;
+        if (preset_parse(line, &p)) {
+            if (preset_add(&g_sdr.presets, &p))
+                got++;
+        } else if (line[0] && line[0] != '#' && line[0] != '\r' && line[0] != '\n') {
+            bad++;
+        }
+    }
+    f.close();
+    Serial.printf("presets: %d from " PRESET_FILE " (%d lines skipped), %d total\n",
+                  got, bad, g_sdr.presets.n);
+}
+
+static void presetSave()
+{
+    preset p;
+    char line[64], msg[UI_TEXT_COLS + 1];
+    sdr_current_preset(&g_sdr, &p);
+    if (!g_presets_loaded)
+        presetLoad();                       // 先讀進來，才知道是不是重複
+    int before = g_sdr.presets.n;
+    if (!preset_add(&g_sdr.presets, &p)) {
+        sdr_msg(&g_sdr, "PRESET LIST FULL");
+        return;
+    }
+    preset_format(&p, line, sizeof line);
+    if (g_sdr.presets.n == before) {
+        snprintf(msg, sizeof msg, "ALREADY IN LIST  %s", line);
+        sdr_msg(&g_sdr, msg);
+        return;
+    }
+    FsFile f;
+    bool ok = false;
+    if (sdBegin()) {
+        bool fresh = !g_sd.exists(PRESET_FILE);
+        if (f.open(PRESET_FILE, O_WRONLY | O_CREAT | O_APPEND)) {
+            if (fresh)
+                f.write("# kHz  mode  bw(Hz)  name   -- see firmware/preset.h\n");
+            f.write(line);
+            f.write("\n");
+            ok = f.close();
+        }
+    }
+    snprintf(msg, sizeof msg, "%s %s", ok ? "SAVED" : "SAVED (RAM ONLY, NO SD)", line);
+    sdr_msg(&g_sdr, msg);
+    Serial.printf("presets: %s\n", msg);
+}
+
+// 每圈一次：處理 sdr.c 送出來的 f／F 請求。
+static void presetPoll()
+{
+    if (g_sdr.preset_save_req) {
+        g_sdr.preset_save_req = 0;
+        presetSave();
+    }
+    if (g_sdr.preset_req) {
+        g_sdr.preset_req = 0;
+        if (!g_presets_loaded)
+            presetLoad();
+        sdr_preset_next(&g_sdr);
+    }
+}
+
 static void pushDdcParams()
 {
     g_p_tune = g_sdr.tune_hz;
@@ -892,6 +990,7 @@ void loop()
     n = dpadPoll(n, ev, KEYS_MAX_EVENTS);
     for (int i = 0; i < n; i++)
         sdr_key(&g_sdr, &ev[i]);
+    presetPoll();
     if (g_sdr.ddc_dirty)
         pushDdcParams();
     g_vol = g_sdr.vol;
