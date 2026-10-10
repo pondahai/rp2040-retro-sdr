@@ -681,3 +681,25 @@ DESIGN §11 第 10 項。原本的 S/N 是單一 bin 對全頻段中位數，跟
 
 **上機**：Core 0 每塊 62 → 63 ms（dsp 37 → 38），比估計的 0.5 ms 多；不掉塊，Core 1 不變。
 使用者確認 S 表正常。Core 0 只剩約 2.5 ms，之後要加東西得先找地方省。
+
+---
+
+## 2026-10-10（續）— M5：封面、選單啟動、收進 bundle
+
+**封面**（依 rp2040-retro-handheld `docs/ICON-STYLE.md`）：具體物件選 1980 年代米色短波收音機——
+伸縮天線、喇叭網、背光刻度窗＋紅指針（唯一的暖色重點）、S 表、調諧大旋鈕、一排波段鍵，等角視角、受光左上、
+深褐描邊、純白底。用 `tools/make_cover.py` 程式畫，可重現；輸出 `assets/RetroSDR.ino.RAW`（18432 B）與預覽 PNG。
+
+第一版轉 RGB565 後只有 32 色（其他封面 400–1300 色）：±4 的顆粒小於 RGB565 一階（8／4／8），量化後消失。
+改成每個面走一段漸層＋±8 顆粒，變 102 色；底色從米白改純白（並排時米白看得出一個框）。
+
+**offset**：`build_offset.bat` 原本就做好了。佈局檢查：image `0x10004000..0x10024200`（131,584 B），
+`SP=0x20042000 Reset=0x100040e3`，`app_present()` 條件通過。
+
+**上機**：SD loader 已被蓋掉，從 bundle `v2026.08.16` 下載 `loader.uf2`（sha256 前 16 碼 `74b643f7be2be8ce`，
+跟 Release 說明相符）直燒；SD 卡放 `RetroSDR.ino.uf2` 與 `RetroSDR.ino.RAW`。選單出現收音機封面、啟動正常。
+
+**跳板**：比對 bundle 的 `trampoline.uf2`（3,072 B）與我們 standalone 的前 16 KB：跳板逐位元組相同，
+其餘補 0xFF；整個 16 KB 也跟 bundle 的 `RetroDict_standalone.uf2` 相同。
+
+**bundle**：封面放進 `covers/RETROSDR.INO.RAW`，兩個 uf2 掛在 Release `v2026.10.10`。
