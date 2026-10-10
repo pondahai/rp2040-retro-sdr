@@ -1,4 +1,5 @@
 #include "sdr.h"
+#include "eq.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -249,6 +250,17 @@ int sdr_key(sdr *s, const key_event *ev)
     case 'f':
         s->preset_req = 1;
         return 1;
+    case 'e': {
+        static const char *const DESC[EQ_NPRESETS] = {
+            "EQ FLAT  (no filter)",
+            "EQ SPK   HP 300 Hz + 2 kHz +6 dB",
+            "EQ SPK+  HP 400 Hz + 2.5 kHz +9 dB",
+            "EQ VOICE HP 300 + 2 kHz +6 dB + LP 3.2 kHz",
+        };
+        s->eq = (s->eq + 1) % EQ_NPRESETS;
+        sdr_msg(s, DESC[s->eq]);
+        return 1;
+    }
     }
     return 0;
 }

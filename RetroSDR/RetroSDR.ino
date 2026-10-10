@@ -45,6 +45,7 @@ extern "C" {
 #include "src/rs_jjy.h"
 #include "src/rs_wav.h"
 #include "src/rs_preset.h"
+#include "src/rs_eq.h"
 }
 
 // ---- 顯示器（spi0）----
@@ -437,6 +438,7 @@ static volatile int32_t  g_p_tune;
 static volatile int      g_p_mode, g_p_bw;
 static volatile uint32_t g_p_seq;
 static volatile int      g_vol;            // 0..SDR_VOL_MAX
+static volatile int      g_eq;             // 喇叭音色預設（eq.h），Core 1 每塊開頭看
 static volatile bool     g_core0_ready;
 
 #define AUD_N 4096                         // 2 的次方
@@ -534,6 +536,14 @@ void loop1()
     int gap = (int)(idx >> 1);
     int n = ddc_block(&g_ddc, g_buf[idx & 1], SDR_BLOCK, SDR_SKIP, gap, out,
                       (int)(sizeof out / sizeof out[0]));
+    // 喇叭音色：DDC 出來之後、進環形緩衝之前
+    static eq s_eq;
+    static int eq_applied = -1;
+    if (g_eq != eq_applied) {
+        eq_applied = g_eq;
+        eq_set(&s_eq, eq_applied, DDC_AFS_X2 / 2.0);
+    }
+    eq_run(&s_eq, out, n);
     g_ddc_us = time_us_32() - t0;
 
     for (int k = 0; k < g_ddc.env_n; k++)
@@ -642,9 +652,9 @@ static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
     snprintf(L[3], W, "CORE1  ddc %lu ms of 65  (fir %lu  cic %lu)",
              (unsigned long)(g_ddc_us / 1000), (unsigned long)(g_ddc.t_post / 1000),
              (unsigned long)((g_ddc.t_total - g_ddc.t_post) / 1000));
-    snprintf(L[4], W, "AUDIO  fill %lu  under %lu  slip %lu  vol %d",
+    snprintf(L[4], W, "AUDIO  fill %lu  under %lu  slip %lu  vol %d  eq %s",
              (unsigned long)(g_aud_w - g_aud_r), (unsigned long)g_aud_under,
-             (unsigned long)g_aud_slip, g_sdr.vol);
+             (unsigned long)g_aud_slip, g_sdr.vol, eq_name(g_sdr.eq));
     snprintf(L[5], W, "CLOCK  sys %lu MHz  peri %lu MHz  spi %lu.%lu MHz",
              (unsigned long)(clock_get_hz(clk_sys) / 1000000),
              (unsigned long)(clock_get_hz(clk_peri) / 1000000),
@@ -1062,6 +1072,7 @@ void setup()
     adcSetup();
     audioBegin();
     g_vol = g_sdr.vol;
+    g_eq = g_sdr.eq;
     pushDdcParams();
     g_core0_ready = true;
 
@@ -1109,6 +1120,7 @@ void loop()
     if (g_sdr.ddc_dirty)
         pushDdcParams();
     g_vol = g_sdr.vol;
+    g_eq = g_sdr.eq;
     testToneSet(g_sdr.tx_on);
     updateTimecodeLine();
     jjyLogPoll();

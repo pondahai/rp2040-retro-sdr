@@ -57,6 +57,7 @@ typedef struct {
     int mode;                         /* DDC_AM / CW / USB / LSB */
     int bw_hz;
     int vol;                          /* 0..SDR_VOL_MAX，0 = 靜音 */
+    int eq;                           /* 喇叭音色預設（eq.h），e 輪流切 */
     int ddc_dirty;                    /* 調諧、模式、頻寬改了：平台要轉給 Core 1 */
     int ref_db;                       /* 頻譜頂端，dBFS（整數 dB） */
     int range_db;                     /* 頻譜高度代表幾 dB */

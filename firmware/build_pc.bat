@@ -7,7 +7,7 @@ rem page (cp950 here); Chinese in a rem line gets mangled. Same rule as the
 rem build scripts in the repo root.
 setlocal
 pushd "%~dp0"
-gcc -std=c11 -O2 -Wall -Wextra -o test_pc.exe test_pc.c sdr.c ui.c spectrum.c fft.c wfall.c font5x7.c keys.c ddc.c jjy.c wav.c preset.c -lm
+gcc -std=c11 -O2 -Wall -Wextra -o test_pc.exe test_pc.c sdr.c ui.c spectrum.c fft.c wfall.c font5x7.c keys.c ddc.c jjy.c wav.c preset.c eq.c -lm
 if errorlevel 1 goto fail
 .\test_pc.exe
 if errorlevel 1 goto fail

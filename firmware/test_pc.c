@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "ddc.h"
+#include "eq.h"
 #include "font5x7.h"
 #include "jjy.h"
 #include "sdr.h"
@@ -132,6 +133,22 @@ static void type(sdr *s, const char *str)
 /* ---- 測試 ---------------------------------------------------------------- */
 
 static sdr g_s;                       /* 140 KB 左右，別放在堆疊上 */
+
+static double eq_gain(int preset, double f, double amp, int16_t *buf, double fs)
+{
+    const int n = 15625;
+    eq e;
+    eq_set(&e, preset, fs);
+    for (int i = 0; i < n; i++)
+        buf[i] = (int16_t)lround(amp * sin(2 * 3.14159265358979323846 * f * i / fs));
+    double in = 0, out = 0;
+    for (int i = n / 2; i < n; i++)
+        in += (double)buf[i] * buf[i];
+    eq_run(&e, buf, n);
+    for (int i = n / 2; i < n; i++)
+        out += (double)buf[i] * buf[i];
+    return 10 * log10((out + 1e-9) / in);
+}
 
 int main(void)
 {
@@ -681,6 +698,33 @@ int main(void)
         for (int i = 0; i < s->ntext; i++)
             seen |= strstr(s->text[i].s, "REC003") ? 2 : 0;
         CHECK(seen == 2, "then the recording line comes back");
+    }
+
+    printf("[12] speaker EQ presets\n");
+    {
+        static int16_t buf[15625];
+        const double fs = DDC_AFS_X2 / 2.0;
+        /* 單音進去，量後半段的振幅比（dB） */
+        #define EQ_GAIN(p, f, amp) eq_gain(p, f, amp, buf, fs)
+        struct { int p; double f, lo, hi; const char *what; } cs[] = {
+            { 0, 1000, -0.1, 0.1, "FLAT 1 kHz unity" },
+            { 1,  100, -99, -15, "SPK 100 Hz cut" },
+            { 1, 2000, 5.0, 7.0, "SPK 2 kHz +6 dB" },
+            { 2,  150, -99, -15, "SPK+ 150 Hz cut" },
+            { 2, 2500, 8.0, 10.0, "SPK+ 2.5 kHz +9 dB" },
+            { 3, 2000, 4.0, 7.0, "VOICE 2 kHz boost" },
+            { 3, 6000, -99, -10, "VOICE 6 kHz cut" },
+        };
+        for (unsigned c = 0; c < sizeof cs / sizeof cs[0]; c++) {
+            double g = EQ_GAIN(cs[c].p, cs[c].f, 4000);
+            CHECK(g > cs[c].lo && g < cs[c].hi, "%s: %.1f dB", cs[c].what, g);
+        }
+        /* 滿刻度：提高的頻段要削頂，不能繞回（int32 溢位會變成反相的大雜訊） */
+        double g = EQ_GAIN(2, 2500, 32000);
+        /* 削頂的正弦接近方波，均方根最多 +3.2 dB；繞回的話會掉很多 */
+        CHECK(g > -1.0 && g < 3.5, "SPK+ full scale at 2.5 kHz clips, no wraparound (%.1f dB)", g);
+        g = EQ_GAIN(1, 7000, 32000);
+        CHECK(g > -3.0 && g < 3.0, "SPK full scale near Nyquist stays sane (%.1f dB)", g);
     }
 
     write_glyphs("glyphs.ppm");
