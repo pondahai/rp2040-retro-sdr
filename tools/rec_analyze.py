@@ -178,8 +178,8 @@ def main():
     if len(starts) > 1:
         dt = np.diff(starts)
         nominal = (blocks.shape[1] + skip) / fs * 1e6
-        L.append(f"block period {dt.mean():.0f} us (min {dt.min()}, max {dt.max()}), "
-                 f"sampling {nominal:.0f} us -> gap {dt.mean()-nominal:.0f} us; "
+        L.append(f"block period {np.median(dt):.0f} us median (min {dt.min()}, max {dt.max()}), "
+                 f"sampling {nominal:.0f} us -> gap {np.median(dt)-nominal:.0f} us; "
                  f"{int(np.sum(dt > 1.5 * nominal))} blocks dropped")
     L.append(f"resolution {fs/a.nfft:.1f} Hz, {a.nfft/fs*1000:.1f} ms segments ({per} per block), {dbs.shape[0]} segments")
     L.append("")
@@ -191,7 +191,7 @@ def main():
     seg_s = a.nfft / fs
     # 段與段的真實間隔：一塊只切得出 per 段，塊與塊之間還有掃描空隙，
     # 所以不是 nfft/fs。有 .TXT 就用實測的塊週期。
-    period = np.diff(starts).mean() / 1e6 if len(starts) > 1 else (blocks.shape[1] + skip) / fs
+    period = np.median(np.diff(starts)) / 1e6 if len(starts) > 1 else (blocks.shape[1] + skip) / fs
     seg_dt = period / per
     for i in marks:
         tr = np.max(dbs[:, max(0, i - 1): i + 2], axis=1)
