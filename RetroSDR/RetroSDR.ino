@@ -1189,11 +1189,11 @@ void loop()
                           (int)(g_jjy.hi - g_jjy.lo), (unsigned long)g_jjy.symbols,
                           (unsigned long)g_jjy.frames, g_jjy.last_err);
         Serial.printf("    core1: ddc %lu us/block (fir+demod %lu us, rest %lu us), "
-                      "audio fill %lu, underruns %lu\n",
+                      "audio fill %lu, underruns %lu, slips %lu, eq %s\n",
                       (unsigned long)g_ddc_us, (unsigned long)g_ddc.t_post,
                       (unsigned long)(g_ddc.t_total - g_ddc.t_post),
                       (unsigned long)(g_aud_w - g_aud_r), (unsigned long)g_aud_under,
-                      (unsigned long)g_aud_slip);
+                      (unsigned long)g_aud_slip, eq_name(g_sdr.eq));
         Serial.printf("    draw: prep %lu us, ui_line %lu us, spi wait %lu us | "
                       "clk_peri %lu MHz, spi0 %lu Hz\n",
                       (unsigned long)g_t_prep, (unsigned long)g_t_line,
