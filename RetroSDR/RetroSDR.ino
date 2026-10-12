@@ -862,6 +862,7 @@ static bool     g_sd_ok, g_rec_open;
 static char     g_rec_name[16];
 static uint32_t g_rec_blocks, g_rec_drops0;
 static uint32_t g_rec_t[REC_MAX_BLOCKS];   // 每塊開始取樣的時間（µs）
+static uint16_t g_rec_s[REC_MAX_BLOCKS];   // 每塊開頭被掃描污染、要丟的點數
 static uint32_t g_rec_wr_last, g_rec_wr_max, g_rec_wr_sum;
 static uint32_t g_rec_msg_until;           // 停止後的結果顯示到幾時（ms）
 static int      g_rec_skip;                // 開檔後先丟掉幾塊，見 recStart()
@@ -956,7 +957,8 @@ static void recStop()
         t.write(b, k);
         t.write("start_us\n", 9);
         for (uint32_t i = 0; i < g_rec_blocks; i++) {
-            k = snprintf(b, sizeof b, "%lu\n", (unsigned long)(g_rec_t[i] - g_rec_t[0]));
+            k = snprintf(b, sizeof b, "%lu %u\n", (unsigned long)(g_rec_t[i] - g_rec_t[0]),
+                         (unsigned)g_rec_s[i]);
             t.write(b, k);
         }
         t.close();
@@ -983,7 +985,7 @@ static void recPoll()
         g_sdr.rec[0] = 0;
 }
 
-static void recBlock(const uint16_t *x, uint32_t t_start)
+static void recBlock(const uint16_t *x, uint32_t t_start, int skip)
 {
     if (g_rec_skip > 0) {
         // 掉塊從丟完之後才開始算：開檔那一圈造成的那一次不算錄音的
@@ -1000,6 +1002,7 @@ static void recBlock(const uint16_t *x, uint32_t t_start)
         recFail("WRITE FAILED (CARD FULL?)");
         return;
     }
+    g_rec_s[g_rec_blocks] = (uint16_t)skip;
     g_rec_t[g_rec_blocks++] = t_start;
     g_rec_wr_sum += g_rec_wr_last;
     if (g_rec_wr_last > g_rec_wr_max)
@@ -1273,9 +1276,11 @@ void loop()
     seq_seen = seq;
     g_sdr.drops += missed;
     int done = g_blk_done;
-    // 這一塊開頭被上一圈的掃描污染了幾點（上一圈記下的）
-    static uint32_t skip_next[2];
-    int skip = (int)skip_next[done];
+    // 這一塊開頭被上一圈的掃描污染了幾點（上一圈記下的）。只有上一圈掃描時正在寫的
+    // 就是這一塊（序號對得上）才算數：掉過塊的話，記下的是更早那一塊的，這一塊開頭
+    // 根本沒掃描 —— 第一版直接拿來用，錄音開檔後的塊 skip 頂到 2047（REC006–008）。
+    static uint32_t skip_next[2], skip_seq[2];
+    int skip = skip_seq[done] == seq ? (int)skip_next[done] : 0;
 
     uint32_t t0 = time_us_32();
     uint8_t rows[8];
@@ -1287,6 +1292,7 @@ void loop()
     {
         uint32_t s = (t_scan - g_blk_start[done ^ 1] + 1) / 2 + SCAN_MARGIN;
         skip_next[done ^ 1] = s > SKIP_MAX ? SKIP_MAX : s;
+        skip_seq[done ^ 1] = seq + 1;          // 這一塊做完時 g_blk_seq 會是 seq + 1
     }
     // FIFO 的一個 word：bit 0 = 緩衝區、bit 1–11 = skip、bit 12 起 = 前面掉了幾塊
     rp2040.fifo.push_nb((uint32_t)done | ((uint32_t)skip << 1) | (missed << 12));
@@ -1339,11 +1345,12 @@ void loop()
     bool recording = g_rec_open;
     if (recording)
     {
-        // 分析時每塊都丟這麼多，寧多勿少。開檔那兩塊（g_rec_skip）不寫，也不算：
-        // 開檔要幾百 ms，那兩塊的 skip 會頂到 SKIP_MAX（REC006 就是 2047）。
+        // .TXT 的 skip 行是最大值（舊工具每塊都丟這麼多）；每塊各自的值跟在 start_us
+        // 後面。錄音時每秒畫一次畫面，那一圈超過一塊的時間，下一圈的掃描落在塊中間，
+        // 從開頭算起就有約 4 ms（頂到 SKIP_MAX，REC006–009）—— 只用最大值的話每塊都丟 4 ms。
         if (g_rec_skip == 0 && skip > g_rec_skip_pts)
             g_rec_skip_pts = skip;
-        recBlock(g_buf[done], g_blk_start[done]);
+        recBlock(g_buf[done], g_blk_start[done], skip);
     }
     else
         sdr_block(&g_sdr, g_buf[done], SDR_BLOCK, skip);

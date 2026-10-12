@@ -35,13 +35,21 @@ int main(int argc, char **argv)
     int skip = 512;                     /* 舊錄音的 .TXT 也有這一行 */
     char mode[8] = "AM";
     static uint32_t start[4096];
+    static int bskip[4096];             /* 每塊的 skip（新檔 start_us 後面第二欄），-1 = 沒有 */
     int nstart = 0;
     FILE *ft = fopen(txt, "r");
     if (ft) {
         char line[128];
         int in_list = 0;
         while (fgets(line, sizeof line, ft)) {
-            if (in_list) { if (nstart < 4096) start[nstart++] = strtoul(line, 0, 10); }
+            if (in_list) {
+                if (nstart < 4096) {
+                    char *e;
+                    start[nstart] = strtoul(line, &e, 10);
+                    bskip[nstart] = (*e == ' ') ? atoi(e + 1) : -1;
+                    nstart++;
+                }
+            }
             else if (!strncmp(line, "tune ", 5)) tune = atol(line + 5);
             else if (!strncmp(line, "skip ", 5)) skip = atoi(line + 5);
             else if (!strncmp(line, "mode ", 5)) sscanf(line + 5, "%7s", mode);
@@ -87,7 +95,8 @@ int main(int argc, char **argv)
             if (gap > gmax) gmax = gap;
         }
         if (nogap) gap = 0;
-        int n = ddc_block(&d, x, BLOCK, skip, gap, out, (int)(sizeof out / sizeof out[0]));
+        int sk = (b < nstart && bskip[b] >= 0) ? bskip[b] : skip;
+        int n = ddc_block(&d, x, BLOCK, sk, gap, out, (int)(sizeof out / sizeof out[0]));
         eq_run(&e, out, n);
         if (getenv("REC_BOUNDS")) fprintf(stderr, "%u\n", total);
         fwrite(out, 2, n, fo);

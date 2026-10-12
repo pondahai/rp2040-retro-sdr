@@ -35,7 +35,7 @@ def read_meta(txt):
         if not line:
             continue
         if in_list:
-            starts.append(int(line))
+            starts.append(int(line.split()[0]))   # 新檔第二欄是該塊的 skip
         elif line == "start_us":
             in_list = True
         else:
