@@ -22,6 +22,9 @@
 //
 // 沒接也能跑，只是看到的是浮接的雜訊。
 //
+// ADC_ON_GP27 = 1（2026-10-12 起掌機上是這個）：偏壓網路與天線改接 GPIO 27（ADC1），
+// GPIO 26 只推 CLOCK，ADC 連續取樣，見下面「鍵盤矩陣」前的說明。
+//
 // 接腳沿用生態系共用骨架（rp2040-retro-handheld/docs/HARDWARE.md）。
 // 授權 GPL-3.0。TFT_DMA.cpp/.h 與面板初始化序列取自 rp2040-retro-dict
 // （源自 PicoApple2，同為 GPL-3.0）。
@@ -76,6 +79,31 @@ extern "C" {
 #define PIN_ADC_Q        27                // 空出來的 ADC1，暫時只設成高阻抗
 #else
 #define DATA_IN_PIN      27
+#endif
+
+// ADC_ON_GP27 = 1：天線（偏壓網路＋耦合電容）從 GPIO 26 移到 GPIO 27（ADC1），
+// GPIO 26 只推鍵盤 CLOCK。ADC 不再跟鍵盤分時：兩個 DMA 通道互相串接、連續取樣，
+// 塊與塊之間沒有空檔，也不用等偏壓回穩。要先有 KBD_SHARED_DATA。
+//
+// 但掃鍵盤的 125 kHz 時脈會從隔壁的 GPIO 26 串進來：REC005 上每塊開頭約 1 ms
+// 全頻段高 10–25 dB，聽起來又是每塊一聲「答」。所以掃描那段時間換算成樣本，
+// 當成那一塊的 skip 丟掉（DDC 照常補），見 loop()。
+#ifndef ADC_ON_GP27
+#define ADC_ON_GP27      0
+#endif
+#if ADC_ON_GP27 && !KBD_SHARED_DATA
+#error "ADC_ON_GP27 needs KBD_SHARED_DATA (GPIO 27 must be free of the 165 QH)"
+#endif
+#if ADC_ON_GP27
+#define ADC_PIN          27
+#define ADC_INPUT        1
+#define ADC_SKIP         0                 // 固定的部分；掃描造成的另外算
+#define SCAN_MARGIN      32                // 掃描結束後再多丟幾點（64 µs）
+#define SKIP_MAX         2047              // FIFO 裡 11 位元
+#else
+#define ADC_PIN          26
+#define ADC_INPUT        0
+#define ADC_SKIP         SDR_SKIP
 #endif
 
 // ---- 喇叭 ----
@@ -155,6 +183,59 @@ static uint32_t g_blk_start[2];             // 每一塊開始取樣的時間（
 // ADC 的上限。FIFO 門檻 1，每個樣本都觸發一次 DREQ。
 // ============================================================================
 
+#if ADC_ON_GP27
+// 連續取樣：通道 0 寫 g_buf[0]、通道 1 寫 g_buf[1]，做完一個就由 chain_to 啟動
+// 另一個，中間不停。做完的那個在 DMA_IRQ_1 裡把寫入位址撥回緩衝區開頭（傳輸
+// 數量硬體會自己重載），下一輪被串起來時才不會寫出界 —— 所以一定要在中斷裡做，
+// 主迴圈晚到（開 SD 卡要幾百 ms）也不會踩壞記憶體，只會算成掉塊。
+static int g_adc_ch[2];
+static volatile uint32_t g_blk_seq;        // 做完幾塊（只增不減）
+static volatile int g_blk_done;            // 最近做完的是哪一塊
+
+static void adcDmaIrq()
+{
+    for (int i = 0; i < 2; i++) {
+        if (!dma_irqn_get_channel_status(1, g_adc_ch[i]))
+            continue;
+        dma_irqn_acknowledge_channel(1, g_adc_ch[i]);
+        dma_channel_set_write_addr(g_adc_ch[i], g_buf[i], false);
+        g_blk_start[i ^ 1] = time_us_32(); // 另一塊此刻剛開始寫
+        g_blk_done = i;
+        g_blk_seq = g_blk_seq + 1;
+    }
+}
+
+static void adcSetup()
+{
+    adc_init();
+    adc_gpio_init(ADC_PIN);
+    adc_select_input(ADC_INPUT);
+    adc_set_clkdiv(0);
+    adc_fifo_setup(true, true, 1, false, false);   // 同下面的單通道版
+    for (int i = 0; i < 2; i++)
+        g_adc_ch[i] = dma_claim_unused_channel(true);
+    for (int i = 0; i < 2; i++) {
+        dma_channel_config c = dma_channel_get_default_config(g_adc_ch[i]);
+        channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
+        channel_config_set_read_increment(&c, false);
+        channel_config_set_write_increment(&c, true);
+        channel_config_set_dreq(&c, DREQ_ADC);
+        channel_config_set_chain_to(&c, g_adc_ch[i ^ 1]);
+        dma_channel_configure(g_adc_ch[i], &c, g_buf[i], &adc_hw->fifo, SDR_BLOCK, false);
+        dma_irqn_set_channel_enabled(1, g_adc_ch[i], true);
+    }
+    irq_add_shared_handler(DMA_IRQ_1, adcDmaIrq, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+    irq_set_enabled(DMA_IRQ_1, true);
+}
+
+static void adcRun()
+{
+    adc_fifo_drain();
+    g_blk_start[0] = time_us_32();
+    dma_channel_start(g_adc_ch[0]);
+    adc_run(true);
+}
+#else
 static int g_adc_dma;
 static dma_channel_config g_adc_cfg;
 
@@ -207,6 +288,8 @@ static void captureStop()
     gpio_put(CLOCK_PIN, 0);
     gpio_set_dir(CLOCK_PIN, GPIO_OUT);     // ... 再轉成輸出：不會冒出高脈衝
 }
+
+#endif
 
 // ============================================================================
 // 鍵盤矩陣
@@ -559,9 +642,17 @@ void loop1()
     }
 
     uint32_t t0 = time_us_32();
+#if ADC_ON_GP27
+    // FIFO：bit 0 = 緩衝區、bit 1–11 = skip（掃描污染）、bit 12 起 = 前面掉了幾塊
+    int skip = (int)((idx >> 1) & SKIP_MAX);
+    uint32_t missed = idx >> 12;
+    int gap = missed > 1000 ? 1000 * SDR_BLOCK : (int)(missed * SDR_BLOCK);
+#else
     // FIFO 的一個 word：bit 0 = 緩衝區編號，其餘 = 這一塊之前的空檔（取樣點數）
+    int skip = ADC_SKIP;
     int gap = (int)(idx >> 1);
-    int n = ddc_block(&g_ddc, g_buf[idx & 1], SDR_BLOCK, SDR_SKIP, gap, out,
+#endif
+    int n = ddc_block(&g_ddc, g_buf[idx & 1], SDR_BLOCK, skip, gap, out,
                       (int)(sizeof out / sizeof out[0]));
     // 喇叭音色：DDC 出來之後、進環形緩衝之前
     static eq s_eq;
@@ -735,8 +826,9 @@ static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
     else
         snprintf(L[9], W, "LOG    %s  %lu lines this session", tcLogFile(),
                  (unsigned long)g_jlog_lines);
-    snprintf(L[10], W, "I = back to waterfall          kbd %s",
-             KBD_SHARED_DATA ? "QH on GP15" : "QH on GP27");
+    snprintf(L[10], W, "I = back to waterfall  kbd %s  adc %s",
+             KBD_SHARED_DATA ? "QH on GP15" : "QH on GP27",
+             ADC_ON_GP27 ? "GP27 cont" : "GP26 shared");
 }
 
 // ============================================================================
@@ -773,6 +865,7 @@ static uint32_t g_rec_t[REC_MAX_BLOCKS];   // 每塊開始取樣的時間（µs�
 static uint32_t g_rec_wr_last, g_rec_wr_max, g_rec_wr_sum;
 static uint32_t g_rec_msg_until;           // 停止後的結果顯示到幾時（ms）
 static int      g_rec_skip;                // 開檔後先丟掉幾塊，見 recStart()
+static int      g_rec_skip_pts;            // 錄音期間最大的 skip（點數），寫進 .TXT
 
 static void recFail(const char *why)
 {
@@ -827,6 +920,7 @@ static void recStart()
     g_rec_skip = 2;
     g_rec_drops0 = g_sdr.drops;               // 還在丟的時候就按停止也算得對
     g_rec_wr_max = g_rec_wr_sum = 0;
+    g_rec_skip_pts = 0;
     Serial.printf("rec: %s started in %lu ms, contiguous %d, spi1 %lu Hz\n", g_rec_name,
                   (unsigned long)((time_us_32() - t_open) / 1000),
                   (int)g_rf.isContiguous(), (unsigned long)spi_get_baudrate(spi1));
@@ -853,7 +947,7 @@ static void recStop()
     if (t.open(tname, O_WRONLY | O_CREAT | O_TRUNC)) {
         char b[96];
         int k = snprintf(b, sizeof b, "rate %d\nblock %d\nskip %d\ntune %ld\nmode %s\n",
-                         SP_FS, SDR_BLOCK, SDR_SKIP, (long)g_sdr.tune_hz, ddc_mode_name(g_sdr.mode));
+                         SP_FS, SDR_BLOCK, g_rec_skip_pts, (long)g_sdr.tune_hz, ddc_mode_name(g_sdr.mode));
         t.write(b, k);
         k = snprintf(b, sizeof b, "blocks %lu\ndrops %lu\nsd_mhz %d\nwrite_ms_avg %lu\nwrite_ms_max %lu\n",
                      (unsigned long)g_rec_blocks, (unsigned long)drops, REC_SD_MHZ,
@@ -1153,8 +1247,12 @@ void setup()
     g_core0_ready = true;
 
     render();                                     // 開機先有畫面，不等第一塊
+#if ADC_ON_GP27
+    adcRun();
+#else
     g_cur = 0;
     captureStart(g_buf[g_cur]);
+#endif
 }
 
 void loop()
@@ -1162,6 +1260,38 @@ void loop()
     static uint32_t last_log;
     static bool painted_quiet;
 
+#if ADC_ON_GP27
+    // 等下一塊做完。一次跳過好幾塊 = 上一圈太久，中間那些塊沒處理（掉塊），
+    // 交給 Core 1 的 gap 就是那幾整塊的長度。取樣本身不會停。
+    static uint32_t seq_seen;
+    uint32_t seq;
+    while ((seq = g_blk_seq) == seq_seen)
+        tight_loop_contents();
+    uint32_t missed = seq - seq_seen - 1;
+    if (seq_seen == 0)
+        missed = 0;
+    seq_seen = seq;
+    g_sdr.drops += missed;
+    int done = g_blk_done;
+    // 這一塊開頭被上一圈的掃描污染了幾點（上一圈記下的）
+    static uint32_t skip_next[2];
+    int skip = (int)skip_next[done];
+
+    uint32_t t0 = time_us_32();
+    uint8_t rows[8];
+    scanMatrix(rows);
+    uint32_t t_scan = time_us_32();
+    g_sdr.scan_us = t_scan - t0;
+    // 掃描時 DMA 正在寫另一塊；從它開始寫到掃描結束（µs ÷ 2 = 點數）都算污染。
+    // 掃描前那一小段其實乾淨，但 skip 只能從開頭算，一起丟。
+    {
+        uint32_t s = (t_scan - g_blk_start[done ^ 1] + 1) / 2 + SCAN_MARGIN;
+        skip_next[done ^ 1] = s > SKIP_MAX ? SKIP_MAX : s;
+    }
+    // FIFO 的一個 word：bit 0 = 緩衝區、bit 1–11 = skip、bit 12 起 = 前面掉了幾塊
+    rp2040.fifo.push_nb((uint32_t)done | ((uint32_t)skip << 1) | (missed << 12));
+#else
+    int skip = ADC_SKIP;
     // 進來時 DMA 已經做完 = 上一圈（處理＋畫面）比一塊的 65 ms 還久，這一塊
     // 之後到現在的樣本沒接上。寬頻頻譜不在乎連續性，但記下來，畫面上看得到。
     if (!dma_channel_is_busy(g_adc_dma))
@@ -1185,6 +1315,8 @@ void loop()
         gap_before_done = (g_sdr.scan_us + 1) / 2;   // µs -> 點數，四捨五入
     }
 
+#endif
+
     // 按鍵
     key_event ev[KEYS_MAX_EVENTS];
     uint32_t now = millis();
@@ -1206,9 +1338,15 @@ void loop()
     uint32_t t1 = time_us_32();
     bool recording = g_rec_open;
     if (recording)
+    {
+        // 分析時每塊都丟這麼多，寧多勿少。開檔那兩塊（g_rec_skip）不寫，也不算：
+        // 開檔要幾百 ms，那兩塊的 skip 會頂到 SKIP_MAX（REC006 就是 2047）。
+        if (g_rec_skip == 0 && skip > g_rec_skip_pts)
+            g_rec_skip_pts = skip;
         recBlock(g_buf[done], g_blk_start[done]);
+    }
     else
-        sdr_block(&g_sdr, g_buf[done], SDR_BLOCK, SDR_SKIP);
+        sdr_block(&g_sdr, g_buf[done], SDR_BLOCK, skip);
     uint32_t t2 = time_us_32();
 
     // 畫面。QUIET 模式只畫一次（讓使用者看到 QUIET 字樣），之後完全不碰

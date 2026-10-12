@@ -16,7 +16,6 @@
 #include "eq.h"
 
 #define BLOCK 32768
-#define SKIP  512
 
 
 static void put32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
@@ -33,6 +32,7 @@ int main(int argc, char **argv)
     strcpy(txt + strlen(txt) - 3, "TXT");
 
     long tune = 0;
+    int skip = 512;                     /* 舊錄音的 .TXT 也有這一行 */
     char mode[8] = "AM";
     static uint32_t start[4096];
     int nstart = 0;
@@ -43,6 +43,7 @@ int main(int argc, char **argv)
         while (fgets(line, sizeof line, ft)) {
             if (in_list) { if (nstart < 4096) start[nstart++] = strtoul(line, 0, 10); }
             else if (!strncmp(line, "tune ", 5)) tune = atol(line + 5);
+            else if (!strncmp(line, "skip ", 5)) skip = atoi(line + 5);
             else if (!strncmp(line, "mode ", 5)) sscanf(line + 5, "%7s", mode);
             else if (!strncmp(line, "start_us", 8)) in_list = 1;
         }
@@ -86,7 +87,7 @@ int main(int argc, char **argv)
             if (gap > gmax) gmax = gap;
         }
         if (nogap) gap = 0;
-        int n = ddc_block(&d, x, BLOCK, SKIP, gap, out, (int)(sizeof out / sizeof out[0]));
+        int n = ddc_block(&d, x, BLOCK, skip, gap, out, (int)(sizeof out / sizeof out[0]));
         eq_run(&e, out, n);
         if (getenv("REC_BOUNDS")) fprintf(stderr, "%u\n", total);
         fwrite(out, 2, n, fo);
