@@ -130,6 +130,7 @@ firmware/          純 C，PC 與板子共用
   test_pc.c        PC 測試
 loader_offset/     偏移編譯用（取自 rp2040-retro-dict）
 tools/rec_analyze.py  分析錄音：最強訊號、頻譜圖、瀑布圖、輸出 I/Q wav（numpy＋Pillow）
+tools/rec_play.c      錄音餵給機上同一份 ddc.c，輸出掌機會播的音訊（gcc，用法見檔頭）
 docs/DESIGN.md     設計文件
 ```
 

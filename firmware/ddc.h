@@ -87,9 +87,13 @@ typedef struct {
     /* 上一塊的耗時（µs）：整塊、其中 FIR＋解調的部分。ddc_clock_us 沒設就是 0。 */
     uint32_t t_total, t_post;
 
-    /* 空檔補樣本：還沒補滿一個音訊樣本的輸入點數、上一塊最後一個輸出 */
+    /* 空檔補樣本：還沒補滿一個音訊樣本的輸入點數；AM 用的還沒補的音訊樣本數、
+     * 這一塊已經出了幾個 CIC 輸出、空檔前最後一個 CIC 輸出（FIR 之前）；
+     * CW／SSB 用的最後一個 FIR 輸出 */
     uint32_t gap_acc;
-    int16_t  last_out;
+    int      pend, cic_new;
+    int32_t  last_bi, last_bq;
+    float    last_zi, last_zq;
 } ddc;
 
 /* 量時間用的時鐘，同 spectrum.h 的 sp_clock_us。 */
@@ -110,8 +114,9 @@ void ddc_set(ddc *d, int32_t tune_hz, int mode, int bw_hz);
  *       空檔）。本振的相位會補上 gap + skip，載波在塊與塊之間才接得起來；
  *       不補的話每塊都有一次相位跳躍，CW 嗶聲會喀喀響。
  *
- * gap + skip 這段沒有樣本的真實時間，也會在 out 開頭補上對應數量的音訊
- * 樣本（前後線性內插，最多 DDC_FILL_MAX 個）。這樣輸出平均剛好是
+ * gap + skip 這段沒有樣本的真實時間，也會在 out 裡補上對應數量的音訊
+ * 樣本（最多 DDC_FILL_MAX 個；CW／SSB 停住基頻、AM 在 FIR 之前內插，見 ddc.c）。
+ * 這樣輸出平均剛好是
  * DDC_AFS_X2/2 = 15625 Hz，播放端可以用固定速率播，不必靠變速追水位
  * （變速 ±3% 就是上機聽到的音高忽高忽低）。BFO 相位也跟著走過去。 */
 int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,

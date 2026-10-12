@@ -26,6 +26,9 @@ static int s_ready;
  * ÷4 長 6 位元）= 2^36，>>9 之後約 2^27，與 fir_sym() 的位元預算一致。 */
 #define CIC_SHIFT 9
 
+/* 空檔之後丟掉幾個 CIC 輸出：CIC³ 的梳狀段要 3 個輸出才把空檔前的值洗掉。 */
+#define CIC_SETTLE 3
+
 /* AGC：包絡放開的速度（每個音訊樣本乘一次，約 0.5 s 降 1/e），以及增益上限
  * 對應的最小包絡。沒有訊號時雜訊會被放大到 32767·0.5·(雜訊/AGC_FLOOR)，
  * 這個值要上機聽了再調。 */
@@ -185,6 +188,67 @@ void ddc_set(ddc *d, int32_t tune_hz, int mode, int bw_hz)
     }
 }
 
+/* 一個基頻樣本（15625 Hz）進 FIR，回傳濾波後的 z。 */
+static inline __attribute__((always_inline)) void fir_push(ddc *d, int32_t bi, int32_t bq,
+                                                           float *zi, float *zq)
+{
+    int hp = d->hpos;
+    d->hist[0][hp] = d->hist[0][hp + DDC_TAPS] = bi;
+    d->hist[1][hp] = d->hist[1][hp + DDC_TAPS] = bq;
+    d->hpos = (hp + 1 == DDC_TAPS) ? 0 : hp + 1;
+
+    /* hist[hp+1 .. hp+TAPS] 是最舊到最新；FIR 對稱，方向無所謂 */
+    int64_t ai = fir_sym(&d->hist[0][hp + 1], d->taps);
+    int64_t aq = fir_sym(&d->hist[1][hp + 1], d->taps);
+    *zi = (float)(ai >> 15);
+    *zq = (float)(aq >> 15);
+    if (d->conj)
+        *zq = -*zq;
+}
+
+/* 解調＋AGC，一個音訊樣本。正常樣本與空檔補的樣本都走這裡，BFO 與 AGC 的
+ * 狀態才接得起來。 */
+static inline __attribute__((always_inline)) float demod(ddc *d, float zi, float zq, float pw)
+{
+    float y;
+    if (d->mode == DDC_AM) {
+        float mag = sqrtf(pw);
+        d->am_dc += (mag - d->am_dc) * 0.001f;     /* τ ≈ 64 ms */
+        y = mag - d->am_dc;
+    } else {
+        /* Re{(zi + j·zq)·e^{+jφ}} = zi·cosφ − zq·sinφ */
+        uint32_t bi = d->bfo_phase >> (32 - NCO_BITS);
+        float bs = s_sin[bi] * (1.0f / NCO_AMP);
+        float bc = s_sin[(bi + NCO_N / 4) & (NCO_N - 1)] * (1.0f / NCO_AMP);
+        d->bfo_phase += d->bfo_step;
+        y = zi * bc - zq * bs;
+    }
+
+    float o;
+    if (d->mode == DDC_AM) {
+        /* AM：增益跟著載波（am_dc），不跟著音訊。載波不隨節目內容變，
+         * 所以字與字之間的停頓不會被拉高、調變的大小聲原樣保留，
+         * 只有衰落才會改變增益。100% 調變時 |y| ≈ 載波 -> AM_TARGET。 */
+        float c = d->am_dc > AM_FLOOR ? d->am_dc : AM_FLOOR;
+        o = y * (AM_TARGET / c);
+        /* 限幅：只有快削頂時才壓。電台的峰值碰不到（REC001 的 1026 kHz
+         * 峰值約 28500），沒有載波時的雜訊（等於 100% 調變）會被它擋住。 */
+        float a = o < 0 ? -o : o;
+        d->agc_env = a > d->agc_env ? a : d->agc_env * AGC_DECAY;
+        if (d->agc_env > AM_LIMIT)
+            o *= AM_LIMIT / d->agc_env;
+    } else {
+        /* CW／SSB 沒有載波：快攻慢放。包絡有下限，沒訊號時不會把雜訊放到滿。 */
+        float a = y < 0 ? -y : y;
+        d->agc_env = a > d->agc_env ? a : d->agc_env * AGC_DECAY;
+        float env = d->agc_env > AGC_FLOOR ? d->agc_env : AGC_FLOOR;
+        o = y * (AGC_TARGET / env);
+    }
+    if (o > 32767.0f) o = 32767.0f;
+    if (o < -32767.0f) o = -32767.0f;
+    return o;
+}
+
 DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
                            int16_t *out, int max)
 {
@@ -196,14 +260,29 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
     d->t_samples += (uint64_t)(gap + skip);
     d->env_n = 0;
 
-    /* 空檔換算成音訊樣本數，先在 out 開頭佔位，整塊做完再內插填上 */
+    /* 空檔換算成音訊樣本數，依模式用兩種方法補（都是要消掉每塊一聲的「答」，
+     * 每秒約 15 下；以前是在音訊上前後線性內插，聲音每塊被削成 2 ms 的直線）：
+     *
+     * CW／SSB：在這裡補 —— FIR 之後的基頻停在最後一個值，BFO 與 AGC 照常走，
+     *   音調原樣延續。不能在 FIR 之前內插：通帶外的強訊號在兩端的值差很多，
+     *   拉一條直線就是一段低頻斜坡，正好落進窄通帶（REC004 上一團突波）。
+     * AM：通帶寬，只停住基頻就是 2 ms 靜音，接縫過 FIR 中央時又一聲。改成等這
+     *   一塊的 CIC 輸出穩了，在 FIR 之前從空檔前的值線性內插過去，見下面
+     *   fir_push 那段。 */
     d->gap_acc += (uint32_t)(gap + skip);
     int fill = (int)(d->gap_acc / DDC_DECIM);
     d->gap_acc %= DDC_DECIM;
     if (fill > DDC_FILL_MAX) fill = DDC_FILL_MAX;
-    if (fill > max) fill = max;
-    d->bfo_phase += (uint32_t)fill * d->bfo_step;
-    produced = fill;
+    if (d->mode == DDC_AM) {
+        d->pend += fill;
+        d->cic_new = 0;
+    } else {
+        float hi = d->last_zi, hq = d->last_zq, hp = hi * hi + hq * hq;
+        for (int k = 0; k < fill && produced < max; k++)
+            out[produced++] = (int16_t)demod(d, hi, hq, hp);
+        d->pend = 0;
+        d->cic_new = CIC_SETTLE;
+    }
     uint32_t i0 = d->integ_a[0][0], i1 = d->integ_a[0][1], i2 = d->integ_a[0][2];
     uint32_t q0 = d->integ_a[1][0], q1 = d->integ_a[1][1], q2 = d->integ_a[1][2];
     int dec_a = d->dec_a;
@@ -265,17 +344,39 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
         t = cq - d->comb[1][1]; d->comb[1][1] = cq; cq = t;
         t = cq - d->comb[1][2]; d->comb[1][2] = cq; cq = t;
 
-        int hp = d->hpos;
-        d->hist[0][hp] = d->hist[0][hp + DDC_TAPS] = (int32_t)(ci >> CIC_SHIFT);
-        d->hist[1][hp] = d->hist[1][hp + DDC_TAPS] = (int32_t)(cq >> CIC_SHIFT);
-        d->hpos = (hp + 1 == DDC_TAPS) ? 0 : hp + 1;
+        int32_t bi = (int32_t)(ci >> CIC_SHIFT), bq = (int32_t)(cq >> CIC_SHIFT);
 
-        /* hist[hp+1 .. hp+TAPS] 是最舊到最新；FIR 對稱，方向無所謂 */
-        int64_t ai = fir_sym(&d->hist[0][hp + 1], d->taps);
-        int64_t aq = fir_sym(&d->hist[1][hp + 1], d->taps);
-        float zi = (float)(ai >> 15), zq = (float)(aq >> 15);
-        if (d->conj)
-            zq = -zq;
+        /* AM 的接縫：CIC³ 的梳狀段記著空檔前的 3 個值，新的頭 CIC_SETTLE 個
+         * 輸出是新舊混在一起的，丟掉、改算進要補的數量。之後第一個乾淨的值
+         * 到了，就從空檔前最後一個值線性內插過去，補的樣本照常走 FIR 與解調，
+         * 包絡接得起來。CW／SSB 的 cic_new 一開始就是 CIC_SETTLE，pend 是 0，
+         * 這段直接跳過。 */
+        if (d->cic_new < CIC_SETTLE) {
+            d->cic_new++;
+            if (d->pend) {                    /* 有空檔才丟；第一塊之前沒東西可接 */
+                d->pend++;
+                t_post += now_us() - tp;
+                continue;
+            }
+        }
+        if (d->pend) {
+            int np = d->pend;
+            d->pend = 0;
+            for (int j = 1; j <= np; j++) {
+                int32_t pi = d->last_bi + (int32_t)((int64_t)(bi - d->last_bi) * j / (np + 1));
+                int32_t pq = d->last_bq + (int32_t)((int64_t)(bq - d->last_bq) * j / (np + 1));
+                float zi, zq;
+                fir_push(d, pi, pq, &zi, &zq);
+                float o = demod(d, zi, zq, zi * zi + zq * zq);
+                if (produced < max)
+                    out[produced++] = (int16_t)o;
+            }
+        }
+        d->last_bi = bi;
+        d->last_bq = bq;
+
+        float zi, zq;
+        fir_push(d, bi, bq, &zi, &zq);
 
         float pw = zi * zi + zq * zq;
         d->level += (pw - d->level) * 0.01f;
@@ -292,55 +393,13 @@ DDC_RAM_FUNC int ddc_block(ddc *d, const uint16_t *x, int n, int skip, int gap,
             d->env_cnt = 0;
         }
 
-        float y;
-        if (d->mode == DDC_AM) {
-            float mag = sqrtf(pw);
-            d->am_dc += (mag - d->am_dc) * 0.001f;     /* τ ≈ 64 ms */
-            y = mag - d->am_dc;
-        } else {
-            /* Re{(zi + j·zq)·e^{+jφ}} = zi·cosφ − zq·sinφ */
-            uint32_t bi = d->bfo_phase >> (32 - NCO_BITS);
-            float bs = s_sin[bi] * (1.0f / NCO_AMP);
-            float bc = s_sin[(bi + NCO_N / 4) & (NCO_N - 1)] * (1.0f / NCO_AMP);
-            d->bfo_phase += d->bfo_step;
-            y = zi * bc - zq * bs;
-        }
-
-        float o;
-        if (d->mode == DDC_AM) {
-            /* AM：增益跟著載波（am_dc），不跟著音訊。載波不隨節目內容變，
-             * 所以字與字之間的停頓不會被拉高、調變的大小聲原樣保留，
-             * 只有衰落才會改變增益。100% 調變時 |y| ≈ 載波 -> AM_TARGET。 */
-            float c = d->am_dc > AM_FLOOR ? d->am_dc : AM_FLOOR;
-            o = y * (AM_TARGET / c);
-            /* 限幅：只有快削頂時才壓。電台的峰值碰不到（REC001 的 1026 kHz
-             * 峰值約 28500），沒有載波時的雜訊（等於 100% 調變）會被它擋住。 */
-            float a = o < 0 ? -o : o;
-            d->agc_env = a > d->agc_env ? a : d->agc_env * AGC_DECAY;
-            if (d->agc_env > AM_LIMIT)
-                o *= AM_LIMIT / d->agc_env;
-        } else {
-            /* CW／SSB 沒有載波：快攻慢放。包絡有下限，沒訊號時不會把雜訊放到滿。 */
-            float a = y < 0 ? -y : y;
-            d->agc_env = a > d->agc_env ? a : d->agc_env * AGC_DECAY;
-            float env = d->agc_env > AGC_FLOOR ? d->agc_env : AGC_FLOOR;
-            o = y * (AGC_TARGET / env);
-        }
-        if (o > 32767.0f) o = 32767.0f;
-        if (o < -32767.0f) o = -32767.0f;
-
+        float o = demod(d, zi, zq, pw);
+        d->last_zi = zi;
+        d->last_zq = zq;
         if (produced < max)
             out[produced++] = (int16_t)o;
         t_post += now_us() - tp;
     }
-
-    if (fill) {
-        int32_t a = d->last_out, b = produced > fill ? out[fill] : a;
-        for (int k = 0; k < fill; k++)
-            out[k] = (int16_t)(a + (b - a) * (k + 1) / (fill + 1));
-    }
-    if (produced)
-        d->last_out = out[produced - 1];
 
     d->lo_phase = ph;
     d->t_samples = t_base + (uint64_t)n;
