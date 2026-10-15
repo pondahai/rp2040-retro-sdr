@@ -94,6 +94,15 @@ extern "C" {
 #if ADC_ON_GP27 && !KBD_SHARED_DATA
 #error "ADC_ON_GP27 needs KBD_SHARED_DATA (GPIO 27 must be free of the 165 QH)"
 #endif
+// SMPS_PWM = 1：GPIO 23 拉高，Pico 板上 RT6150 穩壓器從 PFM（省電，預設）改成固定頻率 PWM。
+// PFM 的切換頻率會隨負載、溫度飄；懷疑 89–94 kHz 那個會飄的寬峰就是它（拆掉 HT6872 仍在，
+// 見 DEVLOG 2026-10-15）。只適用一般 Pico；Pico W 的 GPIO 23 是無線晶片電源。
+// 錄音 .TXT 會多一行 smps pwm／pfm。
+#ifndef SMPS_PWM
+#define SMPS_PWM         0
+#endif
+#define SMPS_PS_PIN      23
+
 #if ADC_ON_GP27
 #define ADC_PIN          27
 #define ADC_INPUT        1
@@ -950,8 +959,9 @@ static void recStop()
         int k = snprintf(b, sizeof b, "rate %d\nblock %d\nskip %d\ntune %ld\nmode %s\n",
                          SP_FS, SDR_BLOCK, g_rec_skip_pts, (long)g_sdr.tune_hz, ddc_mode_name(g_sdr.mode));
         t.write(b, k);
-        k = snprintf(b, sizeof b, "blocks %lu\ndrops %lu\nsd_mhz %d\nwrite_ms_avg %lu\nwrite_ms_max %lu\n",
+        k = snprintf(b, sizeof b, "blocks %lu\ndrops %lu\nsd_mhz %d\nsmps %s\nwrite_ms_avg %lu\nwrite_ms_max %lu\n",
                      (unsigned long)g_rec_blocks, (unsigned long)drops, REC_SD_MHZ,
+                     SMPS_PWM ? "pwm" : "pfm",
                      (unsigned long)(g_rec_blocks ? g_rec_wr_sum / g_rec_blocks / 1000 : 0),
                      (unsigned long)(g_rec_wr_max / 1000));
         t.write(b, k);
@@ -1220,6 +1230,8 @@ void setup()
     // 這支韌體沒有用 UART，換 clk_peri 不影響別的東西；USB 用的是 clk_usb。
     clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
                     SYS_CLOCK_KHZ * 1000, SYS_CLOCK_KHZ * 1000);
+    gpio_init(SMPS_PS_PIN); gpio_set_dir(SMPS_PS_PIN, GPIO_OUT);
+    gpio_put(SMPS_PS_PIN, SMPS_PWM);
     Serial.begin(115200);
     sp_clock_us = time_us_32;
     ddc_clock_us = time_us_32;
