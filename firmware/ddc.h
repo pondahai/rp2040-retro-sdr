@@ -9,6 +9,13 @@
  *   USB  本振 = 調諧點 + 中心；濾波；乘 e^{+j2π·中心·t} 取實部
  *   LSB  本振 = 調諧點 − 中心；濾波；取共軛後同上（頻率翻轉）
  *   AM   本振 = 調諧點；濾波；取振幅 |z|，去 DC
+ *   SAU  同步 AM，只取載波＋上邊帶：本振 = 調諧點 + 中心（載波落在通帶下緣內 150 Hz），
+ *        濾波；BFO 把載波搬回 0 Hz，PLL 鎖住載波相位，取同相分量、去 DC
+ *   SAL  同 SAU，取下邊帶（共軛翻頻）
+ *
+ * SAU／SAL 是給「載波旁邊有一根干擾」用的：一般 AM 取 |z|，干擾跟載波拍出
+ * 嘯音；只留一邊的邊帶就把另一邊的干擾擋掉（REC013：94 kHz 的 594 kHz
+ * 中波混疊，下面 1.1 kHz 有功放載波）。
  *
  * 為什麼 ÷32（15625 Hz）：整數抽取，一塊 32768 點剛好 1024 個音訊樣本。
  * 第一版是 ÷64（7812.5 Hz），AM 只聽得到 3 kHz 以下，而且 CIC 的第一個零點
@@ -40,7 +47,7 @@
 #define DDC_ENV_DECIM 128               /* 15625 / 128 ≈ 122 Hz，每 8.2 ms 一點 */
 #define DDC_ENV_MAX   16
 
-enum { DDC_AM = 0, DDC_CW, DDC_USB, DDC_LSB, DDC_NMODES };
+enum { DDC_AM = 0, DDC_CW, DDC_USB, DDC_LSB, DDC_SAU, DDC_SAL, DDC_NMODES };
 
 #define DDC_CW_PITCH 800                /* CW 嗶聲的音高 */
 
@@ -71,6 +78,7 @@ typedef struct {
 
     /* 解調之後 */
     float    am_dc;                     /* AM 去 DC 的慢平均 */
+    float    pll_f;                     /* SAU／SAL：PLL 的頻率修正，弳／音訊樣本 */
     float    agc_env;                   /* AGC 的包絡 */
     float    level;                     /* 通帶內的訊號強度（給 S 表），線性 */
 

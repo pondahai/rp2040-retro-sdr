@@ -128,11 +128,14 @@ static int hz_bin(int32_t hz)
 
 void sdr_band_meter(sdr *s)
 {
-    /* 解調通帶（跟 ddc_set 一致）：AM／CW 以調諧點為中心，USB／LSB 從 ±150 Hz 起 */
+    /* 解調通帶（跟 ddc_set 一致）：AM／CW 以調諧點為中心，USB／LSB 從 ±150 Hz 起，
+     * SAU／SAL 從載波另一側 150 Hz 起（載波在通帶裡） */
     int32_t lo, hi;
     switch (s->mode) {
     case DDC_USB: lo = s->tune_hz + 150; hi = lo + s->bw_hz; break;
     case DDC_LSB: hi = s->tune_hz - 150; lo = hi - s->bw_hz; break;
+    case DDC_SAU: lo = s->tune_hz - 150; hi = lo + s->bw_hz; break;
+    case DDC_SAL: hi = s->tune_hz + 150; lo = hi - s->bw_hz; break;
     default:      lo = s->tune_hz - s->bw_hz / 2; hi = s->tune_hz + s->bw_hz / 2; break;
     }
     int p0 = hz_bin(lo), p1 = hz_bin(hi);

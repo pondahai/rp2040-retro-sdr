@@ -41,6 +41,11 @@ static int s_ready;
 #define AM_TARGET  24000.0f
 #define AM_FLOOR   60000.0f
 #define AM_LIMIT   30000.0f
+/* 同步 AM 的 PLL（音訊取樣率 15625 Hz）：ωn = 2π·20 Hz，ζ = 0.707。
+ * KP = 2ζωnT，KI = (ωnT)²；頻率修正限 ±300 Hz（調諧誤差、ADC 時脈誤差都在這裡面）。 */
+#define PLL_KP   0.01137f
+#define PLL_KI   6.47e-5f
+#define PLL_FMAX (2.0f * 3.14159265f * 300.0f / 15625.0f)
 
 uint32_t (*ddc_clock_us)(void);
 
@@ -80,17 +85,20 @@ static inline int64_t fir_sym(const int32_t *x, const int16_t *taps)
     return ((int64_t)acc_hi << 16) + acc_lo;
 }
 
-static const char *const MODE_NAME[DDC_NMODES] = { "AM", "CW", "USB", "LSB" };
+static const char *const MODE_NAME[DDC_NMODES] = { "AM", "CW", "USB", "LSB", "SAU", "SAL" };
 
 static const int BW_AM[]  = { 8000, 6000, 4000, 0 };
 static const int BW_CW[]  = { 250, 500, 1000, 0 };
 static const int BW_SSB[] = { 1800, 2400, 2700, 0 };
+/* 同步 AM 的頻寬是單邊：載波下 150 Hz 到載波上 bw − 150 Hz */
+static const int BW_SAM[] = { 4000, 3000, 5000, 0 };
 
 static const int *bw_table(int mode)
 {
     switch (mode) {
     case DDC_AM: return BW_AM;
     case DDC_CW: return BW_CW;
+    case DDC_SAU: case DDC_SAL: return BW_SAM;
     default:     return BW_SSB;
     }
 }
@@ -102,7 +110,8 @@ const char *ddc_mode_name(int mode)
 
 int ddc_default_bw(int mode)
 {
-    return mode == DDC_AM ? 8000 : mode == DDC_CW ? 500 : 2400;
+    return mode == DDC_AM ? 8000 : mode == DDC_CW ? 500 :
+           (mode == DDC_SAU || mode == DDC_SAL) ? 4000 : 2400;
 }
 
 int ddc_next_bw(int mode, int bw_hz)
@@ -141,6 +150,7 @@ void ddc_set(ddc *d, int32_t tune_hz, int mode, int bw_hz)
     d->mode = mode;
     d->bw_hz = bw_hz;
     d->conj = 0;
+    d->pll_f = 0;
 
     /* 本振與 BFO 的位置（見 ddc.h 的表） */
     switch (mode) {
@@ -158,6 +168,15 @@ void ddc_set(ddc *d, int32_t tune_hz, int mode, int bw_hz)
         d->lo_step = step_for(tune_hz - center, DDC_FS);
         d->bfo_step = step_for(center, afs);
         d->conj = 1;
+        break;
+    case DDC_SAU:
+    case DDC_SAL:
+        /* 載波在通帶下緣往內 150 Hz：濾波器過渡帶約 400 Hz，載波本身會掉一點，
+         * 但 PLL 只要相位、增益跟著載波走（am_dc），不影響音量 */
+        center = bw_hz / 2 - 150;
+        d->lo_step = step_for(mode == DDC_SAU ? tune_hz + center : tune_hz - center, DDC_FS);
+        d->bfo_step = step_for(center, afs);
+        d->conj = mode == DDC_SAL;
         break;
     default:                                  /* AM */
         d->lo_step = step_for(tune_hz, DDC_FS);
@@ -215,6 +234,25 @@ static inline __attribute__((always_inline)) float demod(ddc *d, float zi, float
         float mag = sqrtf(pw);
         d->am_dc += (mag - d->am_dc) * 0.001f;     /* τ ≈ 64 ms */
         y = mag - d->am_dc;
+    } else if (d->mode >= DDC_SAU) {
+        /* 同步 AM：BFO 把載波轉到 0 Hz，PLL 把剩下的相位追掉，載波就在 I 上。
+         * 相位偵測用 Q/(|I|+|Q|)：小角度時約等於相位（弳），只要一次除法，
+         * M0+ 上 atan2f 太貴。二階迴路，ωn ≈ 2π·20 Hz、ζ ≈ 0.7。 */
+        uint32_t bi = d->bfo_phase >> (32 - NCO_BITS);
+        float bs = s_sin[bi] * (1.0f / NCO_AMP);
+        float bc = s_sin[(bi + NCO_N / 4) & (NCO_N - 1)] * (1.0f / NCO_AMP);
+        float ui = zi * bc - zq * bs;
+        float uq = zi * bs + zq * bc;
+        float ai = ui < 0 ? -ui : ui, aq = uq < 0 ? -uq : uq;
+        float e = (ai + aq) > 1.0f ? -uq / (ai + aq) : 0.0f;
+        d->pll_f += e * PLL_KI;
+        if (d->pll_f > PLL_FMAX) d->pll_f = PLL_FMAX;
+        if (d->pll_f < -PLL_FMAX) d->pll_f = -PLL_FMAX;
+        float dph = d->pll_f + e * PLL_KP;              /* 弳 */
+        d->bfo_phase += d->bfo_step + (uint32_t)(int32_t)(dph * 683565275.6f);
+        /* 鎖住之後 ui = 載波 + 單邊帶的同相分量；單邊帶的音量只有雙邊包絡的一半，×2 */
+        d->am_dc += (ui - d->am_dc) * 0.001f;
+        y = 2.0f * (ui - d->am_dc);
     } else {
         /* Re{(zi + j·zq)·e^{+jφ}} = zi·cosφ − zq·sinφ */
         uint32_t bi = d->bfo_phase >> (32 - NCO_BITS);
@@ -225,7 +263,7 @@ static inline __attribute__((always_inline)) float demod(ddc *d, float zi, float
     }
 
     float o;
-    if (d->mode == DDC_AM) {
+    if (d->mode == DDC_AM || d->mode >= DDC_SAU) {
         /* AM：增益跟著載波（am_dc），不跟著音訊。載波不隨節目內容變，
          * 所以字與字之間的停頓不會被拉高、調變的大小聲原樣保留，
          * 只有衰落才會改變增益。100% 調變時 |y| ≈ 載波 -> AM_TARGET。 */

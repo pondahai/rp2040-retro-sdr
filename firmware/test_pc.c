@@ -372,6 +372,12 @@ int main(void)
               { { 67500, 20 } }, 1, 1000, 0 },
             { "AM  carrier + 1 kHz, m=0.5 -> 1000 Hz", DDC_AM,
               { { 68500, 40 }, { 67500, 10 }, { 69500, 10 } }, 3, 1000, 0 },
+            /* 同步 AM：載波偏 3 Hz（PLL 要追）、另一側 1.1 kHz 有一根干擾（一般 AM
+             * 會拍出 1.1 kHz 嘯音，要被擋掉） */
+            { "SAU carrier+3Hz, USB 1 kHz, junk -1.1k", DDC_SAU,
+              { { 68503, 40 }, { 69503, 10 }, { 67400, 20 } }, 3, 1000, 1100 },
+            { "SAL carrier+3Hz, LSB 1 kHz, junk +1.1k", DDC_SAL,
+              { { 68503, 40 }, { 67503, 10 }, { 69600, 20 } }, 3, 1000, 1100 },
         };
         const double afs = DDC_AFS_X2 / 2.0;
         for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++) {
