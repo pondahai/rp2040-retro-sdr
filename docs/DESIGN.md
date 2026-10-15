@@ -122,7 +122,7 @@ flowchart TB
     subgraph CORE1["Core 1"]
         direction TB
         DDC["DDC<br/>NCO → CIC ÷8 ÷4 → FIR 127 階"]
-        DEM["解調 AM / CW / USB / LSB<br/>AGC"]
+        DEM["解調 AM / CW / USB / LSB / SAU / SAL<br/>AGC"]
         JJY["JJY 解碼<br/>包絡 122 Hz"]
         AUD["音訊環形緩衝<br/>15625 Hz、計時中斷"]
     end
@@ -229,7 +229,7 @@ Core 0 每抓完一塊，就把緩衝區編號（加上這一塊之前的掃描�
 
 | | 算法（`sdr_band_meter()`，每塊一次，Core 0） |
 | :--- | :--- |
-| **通帶** | 跟 `ddc_set` 一致：AM／CW 為調諧點 ± bw/2；USB 為 +150 … +150+bw；LSB 反過來 |
+| **通帶** | 跟 `ddc_set` 一致：AM／CW 為調諧點 ± bw/2；USB 為 +150 … +150+bw；LSB 反過來；SAU 為 −150 … −150+bw，SAL 反過來 |
 | **雜訊** | 通帶兩側各隔一格、各取 max(通帶格數, 16 格 ≈ 2 kHz) 的 bin，取中位數（旁邊有一兩個台也不怕） |
 | **BAND** | 通帶內各 bin 的線性功率加總 ÷（中位數 × 通帶格數），是 (S+N)/N，沒訊號約 0 dB |
 | **平滑** | 線性比做 1/4 指數平均（約 0.27 s）；通帶的 bin 變了（換台、模式、頻寬）就從這一塊重來 |
@@ -267,6 +267,7 @@ ADC 500k ─→ NCO 混頻 ─→ CIC³ ÷8 ─→ CIC³ ÷4 ─→ FIR 127 階 
 | AM | √(I² + Q²)，去 DC（τ ≈ 64 ms） | 8 kHz（可選 8000／6000／4000） |
 | USB / LSB | 本振偏到通帶中心，低通濾波後再用 BFO 搬回音訊取實部；LSB 先取共軛 | 2.4 kHz（1800／2400／2700） |
 | CW | 本振在調諧點，乘 e^{+j2π·800t} 取實部 → 800 Hz 嗶聲 | 500 Hz（250／500／1000） |
+| SAU / SAL | 同步 AM，只取載波＋一邊邊帶：本振偏 bw/2 − 150，低通後 BFO 把載波搬回 0 Hz，二階 PLL（ωn ≈ 2π·20 Hz）鎖相位，取同相分量去 DC ×2；SAL 先取共軛。載波旁邊另一側有干擾時用（DEVLOG 2026-10-15） | 4 kHz 單邊（3000／4000／5000），載波另一側 150 Hz 起 |
 
 USB／LSB 原設計是 Weaver 或 Hilbert；實作的做法等同 Weaver（本振＋低通＋BFO）。
 FIR 在 15625 Hz 下過渡帶約 400 Hz，CW 250 Hz 這一檔實際會寬一些。

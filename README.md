@@ -48,7 +48,7 @@ flowchart TB
     subgraph CORE1["Core 1"]
         direction TB
         DDC["DDC<br/>NCO → CIC ÷8 ÷4 → FIR 127 階"]
-        DEM["解調 AM / CW / USB / LSB<br/>AGC"]
+        DEM["解調 AM / CW / USB / LSB / SAU / SAL<br/>AGC"]
         JJY["JJY 解碼<br/>包絡 122 Hz"]
         AUD["音訊環形緩衝<br/>15625 Hz、計時中斷"]
     end
@@ -85,7 +85,7 @@ flowchart TB
 | :--- | :--- |
 | D-pad ← → ／ `h` `l`（`H` `L` 一次 10 步） | 調諧 |
 | START ／ `s` | 調諧步進：10／100／1k／10k Hz |
-| SELECT ／ `m` | 解調模式：AM → CW → USB → LSB |
+| SELECT ／ `m` | 解調模式：AM → CW → USB → LSB → SAU → SAL（同步 AM，載波＋上／下邊帶） |
 | `b` | 通帶寬度（依模式） |
 | A ／ B ／ `=` `-` | 音量 0–10 |
 | D-pad ↑ ↓ ／ `k` `j` | 參考位準 ±5 dB |
