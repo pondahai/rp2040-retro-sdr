@@ -73,7 +73,20 @@ extern "C" {
 #endif
 #define DATA_OUT_PIN     15
 #define LATCH_PIN        14
+// KBD_CLK_ON_LCD_DC = 1：595/165 的 CLOCK 從 GPIO 26 改飛線到 LCD 的 D/C（GPIO 20），
+// GPIO 26 完全空出來給 ADC。LCD 只在 CS 低時、於 SCK 邊緣取樣 D/C；掃描在 render()
+// 之後（DMA 已做完、CS 已拉高），D/C 怎麼跳 LCD 都不理。平常 D/C 只在命令／資料
+// 切換時翻一下，順便讓 595/165 移一位也無妨 —— LATCH 沒動，輸出就不變。
+// 比 SD／LCD 的 SCK 安靜得多，不會多一個輻射源。要先有 ADC_ON_GP27。
+#ifndef KBD_CLK_ON_LCD_DC
+#define KBD_CLK_ON_LCD_DC 0
+#endif
+#if KBD_CLK_ON_LCD_DC
+#define CLOCK_PIN        PIN_DISPLAY_DC
+#define PIN_FREE_GP26    26                // 空出來，暫時設成高阻抗
+#else
 #define CLOCK_PIN        26
+#endif
 #if KBD_SHARED_DATA
 #define DATA_IN_PIN      15
 #define PIN_ADC_Q        27                // 空出來的 ADC1，暫時只設成高阻抗
@@ -103,6 +116,9 @@ extern "C" {
 #endif
 #define SMPS_PS_PIN      23
 
+#if KBD_CLK_ON_LCD_DC && !ADC_ON_GP27
+#error "KBD_CLK_ON_LCD_DC needs ADC_ON_GP27 (GP26 shared mode drives CLOCK as the ADC pin)"
+#endif
 #if ADC_ON_GP27
 #define ADC_PIN          27
 #define ADC_INPUT        1
@@ -349,6 +365,12 @@ static uint8_t shiftInSlow()                 // 先讀再打時脈，與原版�
 
 static void scanMatrix(uint8_t rows[8])
 {
+#if KBD_CLK_ON_LCD_DC
+    // 呼叫端保證 LCD 的 DMA 已做完；CS 再拉一次高保險。D/C 掃完要還原。
+    gpio_put(PIN_DISPLAY_CS, 1);
+    bool dc_saved = gpio_get_out_level(CLOCK_PIN);
+    gpio_put(CLOCK_PIN, 0);
+#endif
     for (int row = 0; row < 8; row++) {
         gpio_put(LATCH_PIN, 0);
         shiftOutSlow(0);
@@ -368,7 +390,11 @@ static void scanMatrix(uint8_t rows[8])
     }
     // KBD_SHARED_DATA：共用腳停在輸入，取樣期間 QH 與 GPIO 不對推。
     clockPulse();
+#if KBD_CLK_ON_LCD_DC
+    gpio_put(CLOCK_PIN, dc_saved);           // 還給 LCD（多一個上升邊緣無妨）
+#else
     gpio_put(CLOCK_PIN, 0);                  // 交給 ADC 前一定是低
+#endif
 }
 
 // ============================================================================
@@ -836,6 +862,7 @@ static void updateStats(uint32_t scan_us, uint32_t dsp_us, uint32_t draw_us)
         snprintf(L[9], W, "LOG    %s  %lu lines this session", tcLogFile(),
                  (unsigned long)g_jlog_lines);
     snprintf(L[10], W, "I = back to waterfall  kbd %s  adc %s",
+             KBD_CLK_ON_LCD_DC ? "QH15 CLK20" :
              KBD_SHARED_DATA ? "QH on GP15" : "QH on GP27",
              ADC_ON_GP27 ? "GP27 cont" : "GP26 shared");
 }
@@ -1239,10 +1266,16 @@ void setup()
     gpio_init(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);
     gpio_init(LATCH_PIN);    gpio_set_dir(LATCH_PIN, GPIO_OUT);
     gpio_put(LATCH_PIN, 1);                       // 閒置停在高
+#if KBD_CLK_ON_LCD_DC
+    // CLOCK = LCD D/C，由 tft.begin() 設成輸出。不再拖天線，驅動與斜率維持預設，
+    // 邊緣慢一點輻射也小一點。
+    adc_gpio_init(PIN_FREE_GP26);
+#else
     gpio_init(CLOCK_PIN);    gpio_set_dir(CLOCK_PIN, GPIO_OUT);
     gpio_put(CLOCK_PIN, 0);
     gpio_set_drive_strength(CLOCK_PIN, GPIO_DRIVE_STRENGTH_12MA);
     gpio_set_slew_rate(CLOCK_PIN, GPIO_SLEW_RATE_FAST);
+#endif
 #if KBD_SHARED_DATA
     gpio_disable_pulls(DATA_IN_PIN);              // 預設下拉約 50k，會跟串聯電阻分壓
     adc_gpio_init(PIN_ADC_Q);                    // 高阻抗、關數位輸入；P4 才真的取樣
