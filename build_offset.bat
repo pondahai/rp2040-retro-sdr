@@ -15,7 +15,8 @@ set "PYTHONIOENCODING=utf-8"
 :: to the trampoline (when flashed over USB). DESIGN.md explains why
 :: this, not the plain build, is what ships.
 ::
-:: Optional: set SDR_DEFS=-DKBD_SHARED_DATA=1 before running (see docs/PLAN-IQ.md).
+:: Defaults = current hardware (KBD_SHARED_DATA, ADC_ON_GP27, KBD_CLK_ON_LCD_DC all 1).
+:: Old boards: set SDR_DEFS=-DKBD_SHARED_DATA=0 -DADC_ON_GP27=0 -DKBD_CLK_ON_LCD_DC=0
 ::
 :: Usage:
 ::     build_offset.bat [arduino-cli path] [loader repo path]

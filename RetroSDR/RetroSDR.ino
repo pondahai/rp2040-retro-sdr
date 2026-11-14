@@ -69,7 +69,7 @@ extern "C" {
 // 與 595 的 SER 共用；GPIO 27 的走線割斷，空出來當 ADC1（Q 通道）。寫 595 時
 // GPIO 15 是輸出（蓋過 1 kΩ 後面的 QH），讀 165 時切成輸入。沒改硬體就維持 0。
 #ifndef KBD_SHARED_DATA
-#define KBD_SHARED_DATA  0
+#define KBD_SHARED_DATA  1   // 預設現行接線；舊機器編譯時給 =0
 #endif
 #define DATA_OUT_PIN     15
 #define LATCH_PIN        14
@@ -79,7 +79,7 @@ extern "C" {
 // 切換時翻一下，順便讓 595/165 移一位也無妨 —— LATCH 沒動，輸出就不變。
 // 比 SD／LCD 的 SCK 安靜得多，不會多一個輻射源。要先有 ADC_ON_GP27。
 #ifndef KBD_CLK_ON_LCD_DC
-#define KBD_CLK_ON_LCD_DC 0
+#define KBD_CLK_ON_LCD_DC 1
 #endif
 #if KBD_CLK_ON_LCD_DC
 #define CLOCK_PIN        PIN_DISPLAY_DC
@@ -102,7 +102,7 @@ extern "C" {
 // 全頻段高 10–25 dB，聽起來又是每塊一聲「答」。所以掃描那段時間換算成樣本，
 // 當成那一塊的 skip 丟掉（DDC 照常補），見 loop()。
 #ifndef ADC_ON_GP27
-#define ADC_ON_GP27      0
+#define ADC_ON_GP27      1
 #endif
 #if ADC_ON_GP27 && !KBD_SHARED_DATA
 #error "ADC_ON_GP27 needs KBD_SHARED_DATA (GPIO 27 must be free of the 165 QH)"
