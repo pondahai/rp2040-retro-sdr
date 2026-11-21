@@ -71,8 +71,18 @@ def die(msg):
 
 
 def find_platform():
-    root = Path(os.environ.get("LOCALAPPDATA", "")) / "Arduino15" / "packages" / "rp2040" / "hardware" / "rp2040"
-    if not root.is_dir():
+    rel = Path("packages") / "rp2040" / "hardware" / "rp2040"
+    candidates = []
+    if os.environ.get("ARDUINO_DIRECTORIES_DATA"):
+        candidates.append(Path(os.environ["ARDUINO_DIRECTORIES_DATA"]) / rel)
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        candidates.append(Path(local) / "Arduino15" / rel)
+        pkgs = Path(local) / "Packages"
+        if pkgs.is_dir():
+            candidates.extend(pkgs.glob(f"*/LocalCache/Local/Arduino15/{rel}"))
+    root = next((p for p in candidates if p.is_dir()), None)
+    if root is None:
         die("找不到 arduino-pico 平台目錄,請把路徑當參數傳進來:\n"
             "    python loader_offset/gen_app_ld.py <平台路徑>")
     versions = sorted(p for p in root.iterdir() if p.is_dir())

@@ -352,6 +352,7 @@ static uint8_t shiftInSlow()                 // 先讀再打時脈，與原版�
 {
     uint8_t data = 0;
 #if KBD_SHARED_DATA
+    gpio_put(DATA_OUT_PIN, 0);               // 先主動放電至 0V，避免未接鍵盤時殘留 Row 0 高電位
     gpio_set_dir(DATA_IN_PIN, GPIO_IN);      // 放開共用腳，讓 QH 推過來
     busy_wait_us_32(1);                      // 1 kΩ × 幾 pF 約 10 ns，等 1 µs 很寬裕
 #endif
@@ -1277,7 +1278,11 @@ void setup()
     gpio_set_slew_rate(CLOCK_PIN, GPIO_SLEW_RATE_FAST);
 #endif
 #if KBD_SHARED_DATA
-    gpio_disable_pulls(DATA_IN_PIN);              // 預設下拉約 50k，會跟串聯電阻分壓
+    // 啟用內部下拉（~50kΩ，與 1 kΩ 分壓仍有 ~3.24V，並聯外部 47kΩ 亦有 ~3.17V），
+    // 防止未接鍵盤時浮接誤觸；平常停在輸入，避免與 165 QH 對推。
+    gpio_pull_down(DATA_IN_PIN);
+    gpio_put(DATA_OUT_PIN, 0);
+    gpio_set_dir(DATA_IN_PIN, GPIO_IN);
     adc_gpio_init(PIN_ADC_Q);                    // 高阻抗、關數位輸入；P4 才真的取樣
 #else
     gpio_init(DATA_IN_PIN);  gpio_set_dir(DATA_IN_PIN, GPIO_IN);
